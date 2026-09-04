@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube VP9 + Opus Prioritizer
 // @namespace    https://github.com/AdhityaSar/Force-Codec-in-YT-and-YT-Music
-// @version      0.1.0
-// @description  Prioritize VP9 (video) & Opus (audio) on YouTube & YouTube Music. Does NOT block other codecs - only raises their priority; AVC/AAC/AV1 fallback keeps working.
+// @version      0.2.0
+// @description  Prioritize VP9 (video) & Opus (audio) on YouTube & YouTube Music. Does NOT block other codecs - only raises their priority; AVC/AAC/AV1 fallback keeps working. Optional Strict Audio Mode on YT Music (engages only when Opus exists, with auto-failsafe).
 // @author       AdhityaSar
 // @license      MIT
 // @homepageURL  https://github.com/AdhityaSar/Force-Codec-in-YT-and-YT-Music
@@ -28,11 +28,18 @@
  *      are 100% native.
  *   3) Post-playback verification through the player API (getVideoData)
  *      with console logging, plus an optional one-shot quality re-nudge.
+ *   4) Strict Audio Mode (OPTIONAL, on by default only on music.youtube.com):
+ *      while engaged for a video, audio answers other than Opus (e.g. AAC)
+ *      are reported as unsupported so the player picks the available Opus
+ *      variant instead. It engages ONLY when an Opus variant exists in the
+ *      response, and a watchdog auto-disengages + reloads playback once on
+ *      any media error or stuck buffering. Video codecs are never blocked.
  *
  * Quick debug (DevTools console):
  *   __VP9OPUS.dump()            -> status summary
  *   __VP9OPUS.toggleVerbose()   -> verbose per-format logging
  *   __VP9OPUS.check()           -> check codecs of the currently playing video
+ *   __VP9OPUS.audio()           -> strict audio mode & audio format diagnostics
  */
 
 (function () {
@@ -47,6 +54,7 @@
     AUDIO_PREFER: 'opus',                // preferred audio codec family
     ENABLE_CAPABILITY_PROMOTION: true,   // non-blocking isTypeSupported/canPlayType promotion
     ENABLE_NUDGE: true,                  // one-shot quality re-nudge when the codec mismatches
+    STRICT_AUDIO: location.host === 'music.youtube.com', // conditional AAC blocking (YT Music only by default)
     DEBUG: true,                         // concise console logging
     VERBOSE: false                       // detailed per-format logging
   };
@@ -115,6 +123,32 @@
     var h = (f.height != null) ? f.height : (f.width != null ? f.width : null);
     var q = (h != null) ? h : String(f.qualityLabel || f.quality || '?');
     return 'v:' + q + ':f' + (f.fps != null ? f.fps : '?');
+  }
+
+  /** True when any codec in the mimetype belongs to the given family. */
+  function hasFamily(parsed, family) {
+    if (!parsed || !parsed.codecs || !parsed.codecs.length) return false;
+    for (var i = 0; i < parsed.codecs.length; i++) {
+      if (codecFamily(parsed.codecs[i]) === family) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Strict Audio Mode engagement decision for one player response:
+   * engages only when allowed AND at least one Opus audio variant
+   * exists in adaptiveFormats (so AAC can never be the only option).
+   */
+  function shouldEngageStrictAudio(sd, allowStrict) {
+    if (!allowStrict) return false;
+    if (!sd || typeof sd !== 'object') return false;
+    var af = sd.adaptiveFormats;
+    if (!Array.isArray(af)) return false;
+    for (var i = 0; i < af.length; i++) {
+      var parsed = parseMimeType(af[i] && af[i].mimeType);
+      if (parsed && parsed.kind === 'audio' && primaryFamily(parsed) === 'opus') return true;
+    }
+    return false;
   }
 
   /**
@@ -220,7 +254,15 @@
     nudgedFor: {},
     lastVideoData: null,
     lastSummary: null,
-    rewrites: 0
+    rewrites: 0,
+    lastAudioFormats: [],
+    vp9Base: false,
+    opusBase: false,
+    strictEngaged: false,
+    strictEngagedFor: {},
+    strictDisengagedFor: {},
+    strictEvents: [],
+    strictWatch: {}
   };
   var warned = {};
 
@@ -259,7 +301,10 @@
       state.rewrites++;
       state.lastSummary = summary;
       rememberRewrite(json, summary);
-      var vid = json.videoDetails && json.videoDetails.videoId;
+      var vid = (json.videoDetails && json.videoDetails.videoId) || null;
+      var allowStrict = !!CONFIG.STRICT_AUDIO && !!state.opusBase &&
+        !(vid && state.strictDisengagedFor[vid]);
+      setStrictEngagement(shouldEngageStrictAudio(json.streamingData, allowStrict), vid, srcLabel);
       log('player response [' + srcLabel + '] video=' + (vid || '?') +
         ' -> moved: ' + summary.videoMoved + ' video / ' + summary.audioMoved + ' audio' +
         ' (adaptive=' + summary.adaptive + ', muxed=' + summary.muxed + ')' +
@@ -282,18 +327,107 @@
       state.sabr = !!summary.sabr;
       var heights = [];
       var opus = false;
+      var audioFormats = [];
       var af = (json.streamingData && json.streamingData.adaptiveFormats) || [];
       af.forEach(function (f) {
         var parsed = parseMimeType(f && f.mimeType);
         if (!parsed) return;
         if (parsed.kind === 'audio') {
-          if (primaryFamily(parsed) === CONFIG.AUDIO_PREFER) opus = true;
+          var fam = primaryFamily(parsed);
+          if (fam === CONFIG.AUDIO_PREFER) opus = true;
+          audioFormats.push({
+            itag: f.itag != null ? f.itag : null,
+            codec: parsed.codecs.join(','),
+            family: fam,
+            bitrate: f.bitrate != null ? f.bitrate : null,
+            quality: f.audioQuality || null
+          });
         } else if (parsed.kind === 'video') {
           if (primaryFamily(parsed) === CONFIG.VIDEO_PREFER && f.height != null) heights.push(f.height);
         }
       });
       state.vp9Heights = heights;
       state.opusAvailable = opus;
+      state.lastAudioFormats = audioFormats;
+    } catch (e) {}
+  }
+
+  // ---- Strict Audio Mode (conditional, failsafe-protected) ----
+
+  /**
+   * True when the given mimetype must be reported as unsupported because
+   * Strict Audio Mode is engaged for the current video. Only audio codecs
+   * other than Opus (e.g. AAC/MP4A) and MP4 muxed streams containing AAC
+   * are affected; video codecs are never blocked.
+   */
+  function strictBlockMime(type) {
+    if (!state.strictEngaged || typeof type !== 'string') return false;
+    var parsed;
+    try { parsed = parseMimeType(type); } catch (e) { return false; }
+    if (!parsed) return false;
+    if (parsed.kind === 'audio') return primaryFamily(parsed) !== 'opus';
+    if (parsed.kind === 'video') return hasFamily(parsed, 'aac'); // MP4 muxed (avc+aac); pure video stays untouched
+    return false;
+  }
+
+  function setStrictEngagement(engage, vid, srcLabel) {
+    var next = !!engage;
+    if (vid) state.strictEngagedFor[vid] = next;
+    if (state.strictEngaged === next) return;
+    state.strictEngaged = next;
+    state.strictEvents.push({
+      t: Date.now(),
+      video: vid || '?',
+      engaged: next,
+      src: srcLabel || ''
+    });
+    if (state.strictEvents.length > 50) state.strictEvents.shift();
+    log('Strict Audio Mode ' + (next ? 'ENGAGED' : 'disengaged') +
+      (vid ? ' for video=' + vid : '') + ' [' + (srcLabel || '') + ']' +
+      (next && state.sabr ? ' (note: SABR active - the server may ignore client hints)' : ''));
+    scheduleStrictWatchdog(vid);
+  }
+
+  /** Auto-disengage + one reload per video when playback fails while engaged. */
+  function strictFailureRecovery(reason, vid) {
+    if (!state.strictEngaged) return;
+    var key = vid || state.lastVideoId || 'unknown';
+    if (state.strictDisengagedFor[key]) return;
+    state.strictDisengagedFor[key] = true;
+    setStrictEngagement(false, key, 'failsafe:' + reason);
+    try {
+      var p = getPlayerEl();
+      if (p && typeof p.loadVideoById === 'function' && typeof p.getCurrentTime === 'function' &&
+          typeof p.getVideoData === 'function') {
+        var d = p.getVideoData();
+        var id = (d && d.video_id) || key;
+        var t = p.getCurrentTime();
+        log('Strict Audio failsafe: reloading playback at ' + t.toFixed(1) + 's');
+        p.loadVideoById(id, t);
+      } else {
+        warnOnce('strict-reload', 'player API for reload not available - strict mode disabled for ' + key);
+      }
+    } catch (e) {
+      warnOnce('strict-reload', 'failsafe reload failed:', e && e.message);
+    }
+  }
+
+  /** Watchdog: while engaged, a stuck 'buffering' state triggers recovery. */
+  function scheduleStrictWatchdog(vid) {
+    try {
+      if (state.strictWatch.__any) clearTimeout(state.strictWatch.__any);
+      if (!state.strictEngaged) return;
+      state.strictWatch.__any = setTimeout(function () {
+        state.strictWatch.__any = null;
+        try {
+          var p = getPlayerEl();
+          if (!p || typeof p.getPlayerState !== 'function') return;
+          if (p.getPlayerState() === 'buffering') {
+            var d = typeof p.getVideoData === 'function' ? p.getVideoData() : null;
+            strictFailureRecovery('stuck-buffering', (d && d.video_id) || vid);
+          }
+        } catch (e) {}
+      }, 9000);
     } catch (e) {}
   }
 
@@ -381,9 +515,8 @@
     });
   } catch (e) { warnOnce('yipr', 'ytInitialPlayerResponse trap failed:', e && e.message); }
 
-  // ---- Capability promotion: answers may ONLY be upgraded, never blocked ----
+  // ---- Capability hooks: promotion (upgrade-only) + optional strict blocking ----
   function installCapabilityPromotion() {
-    if (!CONFIG.ENABLE_CAPABILITY_PROMOTION) return;
     var vp9Base = false, opusBase = false;
     try {
       var ms0 = window.MediaSource;
@@ -393,8 +526,11 @@
         opusBase = !!ms0.isTypeSupported('audio/webm; codecs="opus"');
       }
     } catch (e) {}
+    state.vp9Base = vp9Base;
+    state.opusBase = opusBase;
+    if (!CONFIG.ENABLE_CAPABILITY_PROMOTION && !CONFIG.STRICT_AUDIO) return;
     if (!vp9Base && !opusBase) {
-      log('capability promotion skipped (browser does not support basic VP9/Opus)');
+      log('capability hooks skipped (browser does not support basic VP9/Opus)');
       return;
     }
 
@@ -412,9 +548,12 @@
       var ms = window.MediaSource;
       var origITS = ms.isTypeSupported.bind(ms);
       ms.isTypeSupported = function (type) {
+        try {
+          if (strictBlockMime(type)) return false; // Strict Audio: conditional non-Opus audio block
+        } catch (e) {}
         var res = false;
         try { res = !!origITS(type); } catch (e) { res = false; }
-        if (!res && typeof type === 'string') {
+        if (CONFIG.ENABLE_CAPABILITY_PROMOTION && !res && typeof type === 'string') {
           var t = type.toLowerCase();
           if (vp9Base && safeVp9(t)) return true;   // promotion: false -> true
           if (opusBase && safeOpus(t)) return true; // promotion: false -> true
@@ -427,9 +566,12 @@
       var proto = window.HTMLMediaElement.prototype;
       var origCPT = proto.canPlayType;
       proto.canPlayType = function (type) {
+        try {
+          if (strictBlockMime(type)) return ''; // Strict Audio: conditional non-Opus audio block
+        } catch (e) {}
         var res = '';
         try { res = origCPT.call(this, type); } catch (e) { res = ''; }
-        if (res === '' && typeof type === 'string') {
+        if (CONFIG.ENABLE_CAPABILITY_PROMOTION && res === '' && typeof type === 'string') {
           var t2 = type.toLowerCase();
           if (vp9Base && safeVp9(t2)) return 'maybe';  // promotion: '' -> 'maybe'
           if (opusBase && safeOpus(t2)) return 'maybe';
@@ -438,7 +580,9 @@
       };
     } catch (e) { warnOnce('cpt', 'canPlayType override failed:', e && e.message); }
 
-    log('capability promotion active (vp9=' + vp9Base + ', opus=' + opusBase + ', mode: upgrade-only)');
+    log('capability hooks active (vp9=' + vp9Base + ', opus=' + opusBase +
+      ', promotion=' + !!CONFIG.ENABLE_CAPABILITY_PROMOTION +
+      ', strict-audio=' + !!CONFIG.STRICT_AUDIO + ')');
   }
 
 
@@ -475,7 +619,13 @@
           ' -> videoCoding=' + (d.videoCoding || '-') + ' [' + vfam + ']' +
           ', audioCoding=' + (d.audioCoding || '-') + ' [' + afam + ']' +
           ' | vp9: ' + (vOk ? 'OK' : 'NOT VP9') + ', opus: ' + (aOk ? 'OK' : 'NOT OPUS') +
+          (state.strictEngaged ? ' | strict-audio: ENGAGED' : '') +
           (state.sabr ? ' | SABR active' : ''));
+      }
+      // Engaged but the player still reports AAC: the block did not reach it.
+      if (state.strictEngaged && d.audioCoding && afam !== 'opus') {
+        warnOnce('strict-aac-' + vid, 'player still on AAC despite Strict Audio Mode ' +
+          '(block did not reach the player, or SABR decided server-side) - video=' + vid);
       }
       // Nudge: once per video, only when a VP9 variant exists for the same quality
       if (CONFIG.ENABLE_NUDGE && !vOk && d.videoCoding) {
@@ -505,18 +655,47 @@
 
   try { document.addEventListener('loadeddata', function () { scheduleCheck('loadeddata'); }, true); } catch (e) {}
   try { document.addEventListener('yt-navigate-finish', function () { scheduleCheck('navigate'); }, true); } catch (e) {}
+  // Strict Audio failsafe: any media element error while engaged triggers recovery
+  try {
+    document.addEventListener('error', function (ev) {
+      try {
+        if (!state.strictEngaged) return;
+        var el = ev && ev.target;
+        var tag = el && el.tagName;
+        if (tag !== 'VIDEO' && tag !== 'AUDIO' && tag !== 'SOURCE') return;
+        var d = null, p = getPlayerEl();
+        if (p && typeof p.getVideoData === 'function') { try { d = p.getVideoData(); } catch (e2) {} }
+        strictFailureRecovery('media-error' + (el && el.error ? ':' + el.error.code : ''), (d && d.video_id) || null);
+      } catch (e) {}
+    }, true);
+  } catch (e) {}
 
   // ---- Debug API (use from the DevTools console) ----
   window.__VP9OPUS = {
-    version: '0.1.0',
+    version: '0.2.0',
     config: CONFIG,
     state: state,
     toggleVerbose: function () { CONFIG.VERBOSE = !CONFIG.VERBOSE; log('VERBOSE =', CONFIG.VERBOSE); return CONFIG.VERBOSE; },
     toggleDebug: function () { CONFIG.DEBUG = !CONFIG.DEBUG; return CONFIG.DEBUG; },
+    toggleStrictAudio: function () { CONFIG.STRICT_AUDIO = !CONFIG.STRICT_AUDIO; log('STRICT_AUDIO =', CONFIG.STRICT_AUDIO); return CONFIG.STRICT_AUDIO; },
     check: function () { checkCurrentCodecs('manual'); return state.lastVideoData; },
+    audio: function () {
+      return {
+        strictAudioEnabled: !!CONFIG.STRICT_AUDIO,
+        engaged: !!state.strictEngaged,
+        engagedFor: Object.keys(state.strictEngagedFor).filter(function (k) { return state.strictEngagedFor[k]; }),
+        disengagedFor: Object.keys(state.strictDisengagedFor),
+        opusSupport: state.opusBase,
+        vp9Support: state.vp9Base,
+        sabr: state.sabr,
+        current: state.lastVideoData,
+        audioFormats: (state.lastAudioFormats || []).slice(),
+        events: state.strictEvents.slice(-10)
+      };
+    },
     dump: function () {
       return {
-        version: '0.1.0',
+        version: '0.2.0',
         host: location.host,
         config: JSON.parse(JSON.stringify(CONFIG)),
         rewrites: state.rewrites,

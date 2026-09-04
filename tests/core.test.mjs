@@ -15,7 +15,7 @@ if (!match) throw new Error('Markers /* __CORE_START__ */ / /* __CORE_END__ */ n
 
 const core = new Function(
   '"use strict";\n' + match[1] +
-  '\nreturn { parseMimeType, codecFamily, primaryFamily, tierKey, prioritizeFormats, prioritizeStreamingData };'
+  '\nreturn { parseMimeType, codecFamily, primaryFamily, tierKey, hasFamily, shouldEngageStrictAudio, prioritizeFormats, prioritizeStreamingData };'
 )();
 
 let passed = 0, failed = 0;
@@ -134,6 +134,37 @@ t('null/empty object safe', () => {
   eq(core.prioritizeStreamingData(null).touched, false);
   eq(core.prioritizeStreamingData({}).touched, false);
 });
+
+console.log('strict audio engagement');
+t('engages when an Opus variant exists', () =>
+  eq(core.shouldEngageStrictAudio({
+    adaptiveFormats: [
+      { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"' },
+      { itag: 251, mimeType: 'audio/webm; codecs="opus"' }
+    ]
+  }, true), true));
+t('does not engage without any Opus variant', () =>
+  eq(core.shouldEngageStrictAudio({
+    adaptiveFormats: [
+      { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"' },
+      { itag: 137, mimeType: 'video/mp4; codecs="avc1.640028"' }
+    ]
+  }, true), false));
+t('does not engage when strict audio is disabled', () =>
+  eq(core.shouldEngageStrictAudio({ adaptiveFormats: [{ itag: 251, mimeType: 'audio/webm; codecs="opus"' }] }, false), false));
+t('null/empty safe', () => {
+  eq(core.shouldEngageStrictAudio(null, true), false);
+  eq(core.shouldEngageStrictAudio({}, true), false);
+});
+
+console.log('hasFamily');
+t('detects aac inside muxed codecs', () =>
+  eq(core.hasFamily(core.parseMimeType('video/mp4; codecs="avc1.640028, mp4a.40.2"'), 'aac'), true));
+t('pure video has no aac', () =>
+  eq(core.hasFamily(core.parseMimeType('video/mp4; codecs="avc1.640028"'), 'aac'), false));
+t('opus not aac', () =>
+  eq(core.hasFamily(core.parseMimeType('audio/webm; codecs="opus"'), 'aac'), false));
+t('null parsed safe', () => eq(core.hasFamily(null, 'aac'), false));
 
 console.log('\nResults: ' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) process.exit(1);

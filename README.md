@@ -2,6 +2,8 @@
 
 A Tampermonkey/Violentmonkey userscript that **prioritizes** the **VP9** (video) and **Opus** (audio) codecs on YouTube & YouTube Music — **without blocking any other codec**. If VP9/Opus is not available for a stream (e.g. live streams that only offer H.264/AAC), playback continues normally through the fallback.
 
+It also ships an optional **Strict Audio Mode** (on by default only on `music.youtube.com`) for cases where plain prioritization cannot win — e.g. YT Music's "High quality" tier is AAC 256 kbps (itag 141), which has no Opus equivalent (Opus max ≈ 160 kbps, itag 251). While strictly engaged for a video, non-Opus audio answers are reported as unsupported so the player picks the available Opus variant, with automatic failsafes.
+
 ## Files
 
 | File | Description |
@@ -22,6 +24,7 @@ A Tampermonkey/Violentmonkey userscript that **prioritizes** the **VP9** (video)
 1. **Player response rewrite** — hooks `fetch` + `XMLHttpRequest` for `/youtubei/v1/player`, plus a `window.ytInitialPlayerResponse` trap (first page load). `streamingData.adaptiveFormats` is reordered **stably within each quality tier**: the VP9 (video) and Opus (audio) variants move to the front of their tier. No entry is removed → no codec is blocked, the fallback always stays intact.
 2. **Capability promotion (upgrade-only)** — `MediaSource.isTypeSupported` / `canPlayType` may only make an answer *more supportive* (`false→true`, `''→'maybe'`) for VP9 profile 0 / Opus in WebM that the browser really supports. Answers for every other codec stay 100% native.
 3. **Verification & nudge** — after each stream loads, the actual codecs are read via `movie_player.getVideoData()` (`videoCoding`/`audioCoding`) and logged. If the codec does not match the preference while a VP9 variant exists for the same quality, a one-shot `setPlaybackQualityRange` re-nudge is attempted.
+4. **Strict Audio Mode (optional, YT Music only by default)** — engages per video only when an Opus audio variant actually exists in the player response. While engaged, `isTypeSupported`/`canPlayType` may return a negative answer **only** for non-Opus audio (e.g. `audio/mp4; codecs="mp4a..."`) and MP4 muxed streams containing AAC — video codecs are never touched, and everything stays fully native when not engaged. A watchdog disengages + reloads playback once (per video) on any media error or stuck buffering, so worst case you are back to native behavior.
 
 ## Verification
 
@@ -30,8 +33,10 @@ A Tampermonkey/Violentmonkey userscript that **prioritizes** the **VP9** (video)
 3. Console: logs prefixed with `[VP9-Opus]`, plus the commands:
    - `__VP9OPUS.dump()` — status summary (rewrites, SABR, last codecs, etc.)
    - `__VP9OPUS.check()` — check the codecs of the video currently playing
+   - `__VP9OPUS.audio()` — Strict Audio Mode diagnostics: engagement state, available audio formats (itag/codec/bitrate), SABR flag, current codec
+   - `__VP9OPUS.toggleStrictAudio()` — turn Strict Audio Mode on/off at runtime
    - `__VP9OPUS.toggleVerbose()` — detailed per-format logging
-4. `music.youtube.com` → play a song → the audio should be `opus`.
+4. `music.youtube.com` → play a song → the audio should be `opus` (see `__VP9OPUS.audio()` when in doubt; console also logs `Strict Audio Mode ENGAGED`).
 
 ## Configuration (edit the `CONFIG` object at the top of the userscript)
 
@@ -41,11 +46,13 @@ A Tampermonkey/Violentmonkey userscript that **prioritizes** the **VP9** (video)
 | `AUDIO_PREFER` | `'opus'` | preferred audio codec family |
 | `ENABLE_CAPABILITY_PROMOTION` | `true` | non-blocking `isTypeSupported`/`canPlayType` promotion |
 | `ENABLE_NUDGE` | `true` | one-shot quality re-nudge when the codec mismatches |
+| `STRICT_AUDIO` | `true` on `music.youtube.com`, `false` elsewhere | conditional blocking of non-Opus audio while engaged (see "How it works" #4); can be toggled at runtime with `__VP9OPUS.toggleStrictAudio()` |
 | `DEBUG` / `VERBOSE` | `true` / `false` | console logging level |
 
 ## Known limitations
 
 - **SABR (Server ABR)**: YouTube is gradually moving format selection to the server side. The script detects SABR and still prioritizes the client-side format list, but the final choice may be made by the server — verify with Stats for nerds. Because the script **must not block** other codecs, a 100% guarantee on every video is impossible; what is guaranteed is: no codec is ever blocked and the fallback always works.
+- **Strict Audio Mode tradeoff**: on YT Music's "High quality" tier, strictly engaging means Opus ≈ 160 kbps instead of AAC 256 kbps (Opus is more efficient, but the *kbps* number will look lower). If anything goes wrong, the watchdog disengages and reloads once per video — worst case you are back to normal AAC playback. Video-sourced tracks on YT Music almost always have Opus audio variants; when a video genuinely has none, the mode does not engage at all.
 - **Live streams** usually only provide H.264/AAC — they will play normally (fallback), as required.
 - **Tampermonkey/Violentmonkey** are recommended. Greasemonkey 4 (Firefox) uses an X-ray sandbox and is not fully tested.
 
@@ -55,7 +62,7 @@ A Tampermonkey/Violentmonkey userscript that **prioritizes** the **VP9** (video)
 node tests/core.test.mjs
 ```
 
-The tests extract the `/* __CORE_START__ */ ... /* __CORE_END__ */` block from the userscript and verify: mimetype parsing, codec family classification, stable per-tier reordering (no dropped entries — proving there is no blocking), idempotency, SABR detection, and safe handling of empty input.
+The tests extract the `/* __CORE_START__ */ ... /* __CORE_END__ */` block from the userscript and verify: mimetype parsing, codec family classification, stable per-tier reordering (no dropped entries — proving there is no blocking), idempotency, SABR detection, Strict Audio engagement rules, and safe handling of empty input.
 
 ## License
 
