@@ -15,7 +15,7 @@ if (!match) throw new Error('Markers /* __CORE_START__ */ / /* __CORE_END__ */ n
 
 const core = new Function(
   '"use strict";\n' + match[1] +
-  '\nreturn { parseMimeType, codecFamily, primaryFamily, tierKey, hasFamily, shouldEngageStrictAudio, prioritizeFormats, prioritizeStreamingData };'
+  '\nreturn { parseMimeType, codecFamily, primaryFamily, tierKey, hasFamily, shouldEngageStrictAudio, prioritizeFormats, prioritizeStreamingData, strictBlockMime, isSafeVp9Promotion, isSafeOpusPromotion, STRICT_BLOCKED_AUDIO_FAMILIES };'
 )();
 
 let passed = 0, failed = 0;
@@ -51,6 +51,7 @@ t('av01/av99 -> av1', () => { eq(core.codecFamily('av01.0.08M.08'), 'av1'); eq(c
 t('avc1/h264 -> avc', () => { eq(core.codecFamily('avc1.640028'), 'avc'); eq(core.codecFamily('h264'), 'avc'); });
 t('opus -> opus', () => eq(core.codecFamily('opus'), 'opus'));
 t('mp4a.40.2 -> aac', () => eq(core.codecFamily('mp4a.40.2'), 'aac'));
+t('mp3 -> mp3', () => eq(core.codecFamily('mp3'), 'mp3'));
 t('unknown -> unknown', () => eq(core.codecFamily('ec-3'), 'unknown'));
 
 console.log('primaryFamily');
@@ -165,6 +166,60 @@ t('pure video has no aac', () =>
 t('opus not aac', () =>
   eq(core.hasFamily(core.parseMimeType('audio/webm; codecs="opus"'), 'aac'), false));
 t('null parsed safe', () => eq(core.hasFamily(null, 'aac'), false));
+
+console.log('strictBlockMime (pure)');
+t('blocks AAC audio while engaged', () =>
+  eq(core.strictBlockMime('audio/mp4; codecs="mp4a.40.2"', true), true));
+t('allows Opus audio while engaged', () =>
+  eq(core.strictBlockMime('audio/webm; codecs="opus"', true), false));
+t('blocks MP4 muxed streams containing AAC', () =>
+  eq(core.strictBlockMime('video/mp4; codecs="avc1.640028, mp4a.40.2"', true), true));
+t('never blocks pure video', () => {
+  eq(core.strictBlockMime('video/mp4; codecs="avc1.640028"', true), false);
+  eq(core.strictBlockMime('video/webm; codecs="vp9"', true), false);
+});
+t('fail-open for unknown audio families', () => {
+  eq(core.strictBlockMime('audio/mp4; codecs="alac"', true), false);
+  eq(core.strictBlockMime('audio/mp4; codecs="ec-3"', true), false);
+});
+t('blocks other known non-Opus families', () => {
+  eq(core.strictBlockMime('audio/webm; codecs="vorbis"', true), true);
+  eq(core.strictBlockMime('audio/ogg; codecs="flac"', true), true);
+  eq(core.strictBlockMime('audio/mpeg; codecs="mp3"', true), true);
+});
+t('no blocking while not engaged', () => {
+  eq(core.strictBlockMime('audio/mp4; codecs="mp4a.40.2"', false), false);
+  eq(core.strictBlockMime('video/mp4; codecs="avc1.640028, mp4a.40.2"', false), false);
+});
+t('invalid input safe', () => {
+  eq(core.strictBlockMime(null, true), false);
+  eq(core.strictBlockMime(undefined, true), false);
+  eq(core.strictBlockMime('audio/mp4', true), false);
+});
+t('blocked family list is explicit (no unknown)', () =>
+  ok(core.STRICT_BLOCKED_AUDIO_FAMILIES.indexOf('unknown') === -1));
+
+console.log('promotion safety (pure)');
+t('vp9 webm is promotable', () => {
+  eq(core.isSafeVp9Promotion('video/webm; codecs="vp9"'), true);
+  eq(core.isSafeVp9Promotion('video/webm; codecs="vp09.00.51.08"'), true);
+});
+t('vp9 profile 2 (10-bit) is not promoted', () =>
+  eq(core.isSafeVp9Promotion('video/webm; codecs="vp09.02.51.10"'), false));
+t('vp9 outside webm is not promoted', () =>
+  eq(core.isSafeVp9Promotion('video/mp4; codecs="vp09.00.51.08"'), false));
+t('non-vp9 is not promoted', () => {
+  eq(core.isSafeVp9Promotion('video/webm; codecs="av01.0.08M.08"'), false);
+  eq(core.isSafeVp9Promotion(''), false);
+  eq(core.isSafeVp9Promotion(null), false);
+});
+t('opus webm is promotable', () =>
+  eq(core.isSafeOpusPromotion('audio/webm; codecs="opus"'), true));
+t('opus outside webm is not promoted', () => {
+  eq(core.isSafeOpusPromotion('audio/mp4; codecs="opus"'), false);
+  eq(core.isSafeOpusPromotion('audio/webm; codecs="vorbis"'), false);
+  eq(core.isSafeOpusPromotion(null), false);
+});
 
 console.log('\nResults: ' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) process.exit(1);
