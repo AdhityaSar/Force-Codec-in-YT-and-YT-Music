@@ -1,0 +1,20 @@
+{
+  "name": "force-codec-in-yt-and-yt-music",
+  "version": "0.2.1",
+  "private": true,
+  "description": "Tampermonkey/Violentmonkey userscript that prioritizes VP9 (video) and Opus (audio) on YouTube & YouTube Music without blocking any codec.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AdhityaSar/Force-Codec-in-YT-and-YT-Music.git"
+  },
+  "scripts": {
+    "test": "node tests/core.test.mjs && node tests/runtime.smoke.test.mjs",
+    "test:core": "node tests/core.test.mjs",
+    "test:runtime": "node tests/runtime.smoke.test.mjs",
+    "check": "node --check force-codec-in-yt-and-yt-music.user.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
