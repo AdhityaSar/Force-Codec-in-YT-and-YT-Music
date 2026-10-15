@@ -472,7 +472,10 @@
 
   function setStrictEngagement(engage, vid, srcLabel) {
     var next = !!engage;
-    if (vid) state.strictEngagedFor[vid] = next;
+    if (vid) {
+      trackKey(state.strictEngagedFor, vid);
+      state.strictEngagedFor[vid] = next;
+    }
     if (state.strictEngaged === next) return;
     state.strictEngaged = next;
     state.strictEvents.push({

@@ -352,6 +352,27 @@ console.log('strict audio per-video');
   });
 }
 
+// Per-video engagement history is bounded to avoid growing for the lifetime
+// of a long-running YouTube tab.
+{
+  const env = makeEnv();
+  env.run();
+  for (let i = 0; i < 205; i++) {
+    env.sandbox.window.ytInitialPlayerResponse = {
+      videoDetails: { videoId: 'VIDEO' + i },
+      streamingData: {
+        adaptiveFormats: [{ itag: 251, mimeType: 'audio/webm; codecs="opus"' }]
+      }
+    };
+  }
+  const tracked = Object.keys(env.api().state.strictEngagedFor);
+  t('per-video engagement history stays bounded', () => {
+    eq(tracked.length, 200);
+    ok(!tracked.includes('VIDEO0'), 'oldest video id should be evicted');
+    ok(tracked.includes('VIDEO204'), 'most recent video id should be retained');
+  });
+}
+
 // --------------------------------------------------------------------------
 // Watchdog (H1) + media-error failsafe (M2)
 // --------------------------------------------------------------------------
