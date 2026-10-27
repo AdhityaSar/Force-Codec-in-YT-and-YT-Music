@@ -273,6 +273,32 @@ console.log('fetch hook');
 }
 
 // --------------------------------------------------------------------------
+// ytInitialPlayerResponse trap
+// --------------------------------------------------------------------------
+
+console.log('ytInitialPlayerResponse trap');
+{
+  const env = makeEnv();
+  // Pre-populate before run() to verify it is not lost and is immediately processed
+  env.sandbox.window.ytInitialPlayerResponse = {
+    videoDetails: { videoId: 'PRE_EXISTING' },
+    streamingData: {
+      adaptiveFormats: [
+        { itag: 137, mimeType: 'video/mp4; codecs="avc1.640028"', height: 1080, fps: 30 },
+        { itag: 248, mimeType: 'video/webm; codecs="vp9"', height: 1080, fps: 30 }
+      ]
+    }
+  };
+  env.run();
+  const yipr = env.sandbox.window.ytInitialPlayerResponse;
+  t('pre-existing ytInitialPlayerResponse is preserved and prioritized', () => {
+    ok(yipr != null, 'must not be undefined');
+    eq(yipr.videoDetails.videoId, 'PRE_EXISTING');
+    eq(yipr.streamingData.adaptiveFormats.map((f) => f.itag), [248, 137]);
+  });
+}
+
+// --------------------------------------------------------------------------
 // XHR hook
 // --------------------------------------------------------------------------
 
@@ -439,6 +465,45 @@ async function engagedEnv(time) {
   t('codec errors trigger recovery', () => {
     env.fireDocumentEvent('error', { tagName: 'VIDEO', error: { code: 4 } });
     eq(env.player.reloads.length, 1);
+  });
+}
+
+// --------------------------------------------------------------------------
+// Verification & nudge for SD named quality levels
+// --------------------------------------------------------------------------
+
+console.log('verification & nudge');
+{
+  const env = makeEnv();
+  env.run();
+  const api = env.api();
+  // Player response offering 480p VP9
+  env.setBody({
+    videoDetails: { videoId: 'SD_VID' },
+    streamingData: {
+      adaptiveFormats: [
+        { itag: 244, mimeType: 'video/webm; codecs="vp9"', height: 480, fps: 30 },
+        { itag: 135, mimeType: 'video/mp4; codecs="avc1.4d401e"', height: 480, fps: 30 }
+      ]
+    }
+  });
+  await env.sandbox.window.fetch(PLAYER_URL);
+  eq(api.state.vp9Heights, [480]);
+
+  // Player playing AVC at "large" (standard YouTube name for 480p)
+  env.player.videoId = 'SD_VID';
+  env.player.getVideoData = () => ({
+    video_id: 'SD_VID',
+    videoCoding: 'avc1.4d401e',
+    audioCoding: 'opus',
+    quality: 'large'
+  });
+  env.player.getPlaybackQuality = () => 'large';
+
+  api.check();
+  t('nudge fires for named SD quality level (large -> 480p)', () => {
+    eq(env.player.nudges.length, 1);
+    eq(env.player.nudges[0], ['large', 'large']);
   });
 }
 

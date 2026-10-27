@@ -42,6 +42,14 @@ t('without codecs param', () => {
   const p = core.parseMimeType('audio/webm');
   eq(p.kind, 'audio'); eq(p.codecs, []);
 });
+t('unquoted and single-quoted codecs', () => {
+  const p1 = core.parseMimeType('audio/webm; codecs=opus');
+  eq(p1.kind, 'audio'); eq(p1.codecs, ['opus']);
+  const p2 = core.parseMimeType("audio/webm; codecs='opus'");
+  eq(p2.kind, 'audio'); eq(p2.codecs, ['opus']);
+  const p3 = core.parseMimeType('  video/webm; codecs=vp9  ');
+  eq(p3.kind, 'video'); eq(p3.codecs, ['vp9']);
+});
 t('invalid input -> null', () => eq(core.parseMimeType(undefined), null));
 
 console.log('codecFamily');
@@ -168,8 +176,10 @@ t('opus not aac', () =>
 t('null parsed safe', () => eq(core.hasFamily(null, 'aac'), false));
 
 console.log('strictBlockMime (pure)');
-t('blocks AAC audio while engaged', () =>
-  eq(core.strictBlockMime('audio/mp4; codecs="mp4a.40.2"', true), true));
+t('blocks AAC audio while engaged', () => {
+  eq(core.strictBlockMime('audio/mp4; codecs="mp4a.40.2"', true), true);
+  eq(core.strictBlockMime('audio/mp4; codecs=mp4a.40.2', true), true);
+});
 t('allows Opus audio while engaged', () =>
   eq(core.strictBlockMime('audio/webm; codecs="opus"', true), false));
 t('blocks MP4 muxed streams containing AAC', () =>
@@ -203,9 +213,13 @@ console.log('promotion safety (pure)');
 t('vp9 webm is promotable', () => {
   eq(core.isSafeVp9Promotion('video/webm; codecs="vp9"'), true);
   eq(core.isSafeVp9Promotion('video/webm; codecs="vp09.00.51.08"'), true);
+  eq(core.isSafeVp9Promotion('video/webm; codecs=vp9'), true);
+  eq(core.isSafeVp9Promotion('video/webm; codecs=vp09.00.51.08'), true);
 });
-t('vp9 profile 2 (10-bit) is not promoted', () =>
-  eq(core.isSafeVp9Promotion('video/webm; codecs="vp09.02.51.10"'), false));
+t('vp9 profile 2 (10-bit) is not promoted', () => {
+  eq(core.isSafeVp9Promotion('video/webm; codecs="vp09.02.51.10"'), false);
+  eq(core.isSafeVp9Promotion('video/webm; codecs=vp09.02.51.10'), false);
+});
 t('vp9 outside webm is not promoted', () =>
   eq(core.isSafeVp9Promotion('video/mp4; codecs="vp09.00.51.08"'), false));
 t('non-vp9 is not promoted', () => {

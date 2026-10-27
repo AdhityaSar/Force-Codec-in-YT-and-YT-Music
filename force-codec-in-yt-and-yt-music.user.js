@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube VP9 + Opus Prioritizer
 // @namespace    https://github.com/AdhityaSar/Force-Codec-in-YT-and-YT-Music
-// @version      0.2.1
+// @version      0.2.2
 // @description  Prioritize VP9 (video) & Opus (audio) on YouTube & YouTube Music. Does NOT block other codecs - only raises their priority; AVC/AAC/AV1 fallback keeps working. Optional Strict Audio Mode on YT Music (engages only when Opus exists, with auto-failsafe).
 // @author       AdhityaSar
 // @license      MIT
@@ -79,14 +79,16 @@
   /** 'video/webm; codecs="vp09.00.51.08"' -> {container, kind, codecs[]} */
   function parseMimeType(mime) {
     if (typeof mime !== 'string' || mime.indexOf('/') === -1) return null;
-    var semi = mime.indexOf(';');
-    var container = (semi === -1 ? mime : mime.slice(0, semi)).trim().toLowerCase();
+    var s = mime.trim();
+    var semi = s.indexOf(';');
+    var container = (semi === -1 ? s : s.slice(0, semi)).trim().toLowerCase();
     var kind = container.indexOf('video/') === 0 ? 'video'
       : (container.indexOf('audio/') === 0 ? 'audio' : 'other');
     var codecs = [];
-    var m = /codecs\s*=\s*"([^"]*)"/i.exec(mime);
+    var m = /codecs\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;,\s]+))/i.exec(s);
     if (m) {
-      m[1].split(',').forEach(function (c) {
+      var raw = m[1] || m[2] || m[3] || '';
+      raw.split(',').forEach(function (c) {
         var t = c.trim();
         if (t) codecs.push(t);
       });
@@ -282,8 +284,9 @@
     if (typeof type !== 'string') return false;
     var t = type.toLowerCase();
     if (t.indexOf('video/webm') !== 0) return false;
-    var m = /codecs\s*=\s*"([^"]*)"/i.exec(t);
-    if (m && /^vp09\.02/.test(m[1].trim())) return false;
+    var m = /codecs\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;,\s]+))/i.exec(t);
+    var raw = m ? (m[1] || m[2] || m[3] || '') : '';
+    if (raw && /^vp09\.02/.test(raw.trim())) return false;
     return /vp0?9/i.test(t);
   }
 
@@ -681,7 +684,10 @@
 
   // ---- window.ytInitialPlayerResponse trap (first page load) ----
   try {
-    var _yipr;
+    var _yipr = window.ytInitialPlayerResponse;
+    if (_yipr && typeof _yipr === 'object' && _yipr.streamingData) {
+      processPlayerResponse(_yipr, 'initial ' + location.pathname);
+    }
     Object.defineProperty(window, 'ytInitialPlayerResponse', {
       configurable: true,
       enumerable: true,
@@ -772,9 +778,18 @@
     try { return document.getElementById('movie_player'); } catch (e) { return null; }
   }
 
+  var NAMED_HEIGHTS = {
+    tiny: 144,
+    small: 240,
+    medium: 360,
+    large: 480
+  };
+
   function currentHeight(qualityStr) {
-    var m = /(\d{3,4})/.exec(String(qualityStr || ''));
-    return m ? parseInt(m[1], 10) : null;
+    var s = String(qualityStr || '').toLowerCase();
+    var m = /(\d{3,4})/.exec(s);
+    if (m) return parseInt(m[1], 10);
+    return NAMED_HEIGHTS[s] || null;
   }
 
   function checkCurrentCodecs(reason) {
@@ -855,6 +870,7 @@
 
   try { document.addEventListener('loadeddata', function () { scheduleCheck('loadeddata'); }, true); } catch (e) {}
   try { document.addEventListener('yt-navigate-finish', function () { scheduleCheck('navigate'); }, true); } catch (e) {}
+  try { window.addEventListener('yt-navigate-finish', function () { scheduleCheck('navigate'); }, true); } catch (e) {}
   // Strict Audio failsafe: a *codec-related* media error while engaged triggers
   // recovery. Network/abort errors are ignored so a flaky connection does not
   // needlessly reload playback or permanently disable strict mode.
@@ -879,7 +895,7 @@
 
   // ---- Debug API (use from the DevTools console) ----
   window.__VP9OPUS = {
-    version: '0.2.1',
+    version: '0.2.2',
     config: CONFIG,
     state: state,
     toggleVerbose: function () { CONFIG.VERBOSE = !CONFIG.VERBOSE; log('VERBOSE =', CONFIG.VERBOSE); return CONFIG.VERBOSE; },
@@ -923,7 +939,7 @@
     },
     dump: function () {
       return {
-        version: '0.2.1',
+        version: '0.2.2',
         host: location.host,
         config: JSON.parse(JSON.stringify(CONFIG)),
         responsesProcessed: state.responsesProcessed,
