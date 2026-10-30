@@ -100,10 +100,13 @@ t('1080p30: vp9 (248) before avc (137) & av1 (398)', () =>
 t('audio: opus (251) before aac (140)', () => ok(order.indexOf(251) < order.indexOf(140)));
 t('entry objects identical (not cloned/modified)', () =>
   ok(r.list.every(f => AF.indexOf(f) !== -1)));
+t('changed ordering returns a replacement array', () => ok(r.list !== AF));
 t('idempotent (running twice gives the same result)', () => {
   const r2 = core.prioritizeFormats(r.list);
   eq(r2.list.map(f => f.itag), order);
   eq(r2.moved, 0);
+  ok(r2.list === r.list, 'unchanged ordering should return the original array');
+  eq([r2.videoMoved, r2.audioMoved, r2.groups], [0, 0, r.groups]);
 });
 t('stable when the preferred codec is absent in a tier', () => {
   const noVp9 = [
@@ -248,5 +251,4 @@ t('opus outside webm is not promoted', () => {
 
 console.log('\nResults: ' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) process.exit(1);
-
 
