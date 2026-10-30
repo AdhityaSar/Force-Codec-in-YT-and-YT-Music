@@ -115,9 +115,20 @@ function makeEnv(host = 'music.youtube.com') {
     }
   };
 
+  const mediaCapabilities = {
+    decodingInfo(cfg) {
+      return Promise.resolve({ supported: true, smooth: true, powerEfficient: true });
+    }
+  };
+
+  const navigatorObj = {
+    mediaCapabilities
+  };
+
   const windowObj = {
     MediaSource: mediaSource,
     HTMLMediaElement: htmlMediaElement,
+    navigator: navigatorObj,
     fetch(input) {
       const url = typeof input === 'string' ? input : (input && input.url) || '';
       if (url.indexOf('/youtubei/v1/player') === -1) {
@@ -144,6 +155,7 @@ function makeEnv(host = 'music.youtube.com') {
   const sandbox = {
     window: windowObj,
     document: documentObj,
+    navigator: navigatorObj,
     location: { host, pathname: '/watch', href: 'https://' + host + '/watch' },
     console: {
       log: (...a) => logs.push(a),
@@ -363,6 +375,14 @@ console.log('strict audio per-video');
     const proto = env.sandbox.window.HTMLMediaElement.prototype;
     eq(proto.canPlayType(AAC), '');
     eq(proto.canPlayType(PURE_VIDEO), 'probably');
+  });
+
+  const mc = env.sandbox.window.navigator.mediaCapabilities;
+  const aacRes = await mc.decodingInfo({ audio: { contentType: AAC } });
+  const opusRes = await mc.decodingInfo({ audio: { contentType: OPUS } });
+  t('decodingInfo is blocked consistently for AAC and passes for Opus', () => {
+    eq(aacRes.supported, false);
+    eq(opusRes.supported, true);
   });
 
   t('toggleStrictAudio(false) releases the block immediately', () => {

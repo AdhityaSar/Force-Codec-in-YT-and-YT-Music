@@ -10,6 +10,7 @@
 // @updateURL    https://github.com/AdhityaSar/Force-Codec-in-YT-and-YT-Music/raw/main/force-codec-in-yt-and-yt-music.user.js
 // @downloadURL  https://github.com/AdhityaSar/Force-Codec-in-YT-and-YT-Music/raw/main/force-codec-in-yt-and-yt-music.user.js
 // @match        https://www.youtube.com/*
+// @match        https://youtube.com/*
 // @match        https://m.youtube.com/*
 // @match        https://music.youtube.com/*
 // @match        https://www.youtube-nocookie.com/embed/*
@@ -124,13 +125,18 @@
     return codecFamily(parsed.codecs[0]);
   }
 
-  /** Quality tier key: video = (height, fps); audio = audioQuality. */
+  /** Quality tier key: video = (height, fps, hdr); audio = (audioQuality, channels). */
   function tierKey(f, parsed) {
     if (!f) return 'null';
-    if (parsed && parsed.kind === 'audio') return 'a:' + (f.audioQuality || 'n/a');
+    if (parsed && parsed.kind === 'audio') {
+      return 'a:' + (f.audioQuality || 'n/a') + ':c' + (f.audioChannels != null ? f.audioChannels : 2);
+    }
     var h = (f.height != null) ? f.height : (f.width != null ? f.width : null);
     var q = (h != null) ? h : String(f.qualityLabel || f.quality || '?');
-    return 'v:' + q + ':f' + (f.fps != null ? f.fps : '?');
+    // ponytail: HDR detect via label or colorInfo transfer characteristics.
+    var isHdr = (f.qualityLabel && /hdr/i.test(f.qualityLabel)) ||
+      (f.colorInfo && /hlg|pq|smpte2084|bt2020/i.test(JSON.stringify(f.colorInfo)));
+    return 'v:' + q + ':f' + (f.fps != null ? f.fps : '?') + (isHdr ? ':hdr' : '');
   }
 
   /** True when any codec in the mimetype belongs to the given family. */
@@ -286,7 +292,7 @@
     if (t.indexOf('video/webm') !== 0) return false;
     var m = /codecs\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;,\s]+))/i.exec(t);
     var raw = m ? (m[1] || m[2] || m[3] || '') : '';
-    if (raw && /^vp09\.02/.test(raw.trim())) return false;
+    if (raw && /(?:^|,)\s*vp0?9\.02/i.test(raw.trim())) return false;
     return /vp0?9/i.test(t);
   }
 
@@ -410,7 +416,7 @@
         if (!parsed) return;
         if (parsed.kind === 'audio') {
           var fam = primaryFamily(parsed);
-          if (fam === CONFIG.AUDIO_PREFER) opus = true;
+          if (fam === 'opus') opus = true;
           audioFormats.push({
             itag: f.itag != null ? f.itag : null,
             codec: parsed.codecs.join(','),
@@ -766,6 +772,24 @@
         return res;
       };
     } catch (e) { warnOnce('cpt', 'canPlayType override failed:', e && e.message); }
+
+    // ponytail: decodingInfo strict block. Upgrade if smooth/powerEfficient manipulation is needed.
+    try {
+      var nav = window.navigator;
+      var mc = nav && nav.mediaCapabilities;
+      if (mc && typeof mc.decodingInfo === 'function') {
+        var origDecodingInfo = mc.decodingInfo.bind(mc);
+        mc.decodingInfo = function (cfg) {
+          try {
+            if (cfg && (shouldStrictBlock(cfg.audio && cfg.audio.contentType) ||
+                        shouldStrictBlock(cfg.video && cfg.video.contentType))) {
+              return Promise.resolve({ supported: false, smooth: false, powerEfficient: false });
+            }
+          } catch (e) {}
+          return origDecodingInfo(cfg);
+        };
+      }
+    } catch (e) { warnOnce('mc', 'decodingInfo override failed:', e && e.message); }
 
     log('capability hooks active (vp9=' + vp9Base + ', opus=' + opusBase +
       ', promotion=' + !!CONFIG.ENABLE_CAPABILITY_PROMOTION +

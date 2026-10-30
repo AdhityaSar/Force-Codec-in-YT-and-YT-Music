@@ -68,6 +68,16 @@ t('muxed video/mp4 -> avc (not aac)', () =>
 t('audio/webm opus -> opus', () =>
   eq(core.primaryFamily(core.parseMimeType('audio/webm; codecs="opus"')), 'opus'));
 
+console.log('tierKey');
+t('audio defaults to c2 and respects audioChannels', () => {
+  eq(core.tierKey({ audioQuality: 'AUDIO_QUALITY_MEDIUM' }, { kind: 'audio' }), 'a:AUDIO_QUALITY_MEDIUM:c2');
+  eq(core.tierKey({ audioQuality: 'AUDIO_QUALITY_MEDIUM', audioChannels: 6 }, { kind: 'audio' }), 'a:AUDIO_QUALITY_MEDIUM:c6');
+});
+t('video differentiates SDR and HDR', () => {
+  eq(core.tierKey({ height: 1080, fps: 60, qualityLabel: '1080p60' }, { kind: 'video' }), 'v:1080:f60');
+  eq(core.tierKey({ height: 1080, fps: 60, qualityLabel: '1080p60 HDR' }, { kind: 'video' }), 'v:1080:f60:hdr');
+  eq(core.tierKey({ height: 1080, fps: 60, colorInfo: { transferCharacteristics: 'COLOR_TRANSFER_CHARACTERISTICS_SMPTE2084' } }, { kind: 'video' }), 'v:1080:f60:hdr');
+});
 
 console.log('prioritizeFormats');
 const AF = [
@@ -219,6 +229,7 @@ t('vp9 webm is promotable', () => {
 t('vp9 profile 2 (10-bit) is not promoted', () => {
   eq(core.isSafeVp9Promotion('video/webm; codecs="vp09.02.51.10"'), false);
   eq(core.isSafeVp9Promotion('video/webm; codecs=vp09.02.51.10'), false);
+  eq(core.isSafeVp9Promotion('video/webm; codecs="opus, vp09.02.51.10"'), false);
 });
 t('vp9 outside webm is not promoted', () =>
   eq(core.isSafeVp9Promotion('video/mp4; codecs="vp09.00.51.08"'), false));
