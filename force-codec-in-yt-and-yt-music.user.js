@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube VP9 + Opus Prioritizer
 // @namespace    https://github.com/AdhityaSar/Force-Codec-in-YT-and-YT-Music
-// @version      0.2.2
+// @version      0.2.3
 // @description  Prioritize VP9 (video) & Opus (audio) on YouTube & YouTube Music. Does NOT block other codecs - only raises their priority; AVC/AAC/AV1 fallback keeps working. Optional Strict Audio Mode on YT Music (engages only when Opus exists, with auto-failsafe).
 // @author       AdhityaSar
 // @license      MIT
@@ -919,7 +919,7 @@
 
   // ---- Debug API (use from the DevTools console) ----
   window.__VP9OPUS = {
-    version: '0.2.2',
+    version: '0.2.3',
     config: CONFIG,
     state: state,
     toggleVerbose: function () { CONFIG.VERBOSE = !CONFIG.VERBOSE; log('VERBOSE =', CONFIG.VERBOSE); return CONFIG.VERBOSE; },
@@ -963,7 +963,7 @@
     },
     dump: function () {
       return {
-        version: '0.2.2',
+        version: '0.2.3',
         host: location.host,
         config: JSON.parse(JSON.stringify(CONFIG)),
         responsesProcessed: state.responsesProcessed,
