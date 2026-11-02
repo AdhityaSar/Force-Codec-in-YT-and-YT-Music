@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube VP9 + Opus Prioritizer
 // @namespace    https://github.com/AdhityaSar/Force-Codec-in-YT-and-YT-Music
-// @version      0.2.4
+// @version      0.2.5
 // @description  Prioritize VP9 (video) & Opus (audio) on YouTube & YouTube Music. Does NOT block other codecs - only raises their priority; AVC/AAC/AV1 fallback keeps working. Optional Strict Audio Mode on YT Music (engages only when Opus exists, with auto-failsafe).
 // @author       AdhityaSar
 // @license      MIT
@@ -61,6 +61,7 @@
     ENABLE_CAPABILITY_PROMOTION: true,   // non-blocking isTypeSupported/canPlayType promotion
     ENABLE_NUDGE: true,                  // one-shot quality re-nudge when the codec mismatches
     STRICT_AUDIO: location.host === 'music.youtube.com', // conditional AAC blocking (YT Music only by default)
+    ALLOW_HIGH_AUDIO_AAC: true,          // don't block AAC if High quality tier (256k / itag 141) exists
     DEBUG: true,                         // concise console logging
     VERBOSE: false                       // detailed per-format logging
   };
@@ -149,20 +150,44 @@
   }
 
   /**
+   * True when a format represents high-tier AAC (e.g. YT Music Premium
+   * 256 kbps AAC, itag 141, or audioQuality AUDIO_QUALITY_HIGH).
+   */
+  function isHighQualityAac(f, parsed) {
+    if (!f) return false;
+    var p = parsed || parseMimeType(f.mimeType);
+    if (!p || p.kind !== 'audio' || primaryFamily(p) !== 'aac') return false;
+    if (f.itag === 141) return true;
+    if (f.audioQuality === 'AUDIO_QUALITY_HIGH') return true;
+    if (typeof f.bitrate === 'number' && f.bitrate >= 200000) return true;
+    return false;
+  }
+
+  /**
    * Strict Audio Mode engagement decision for one player response:
    * engages only when allowed AND at least one Opus audio variant
    * exists in adaptiveFormats (so AAC can never be the only option).
+   * In smart mode (opts.allowHighAac === true), engagement is skipped
+   * when a high-quality AAC stream (e.g. 256 kbps / itag 141) is available.
    */
-  function shouldEngageStrictAudio(sd, allowStrict) {
+  function shouldEngageStrictAudio(sd, allowStrict, opts) {
     if (!allowStrict) return false;
     if (!sd || typeof sd !== 'object') return false;
     var af = sd.adaptiveFormats;
     if (!Array.isArray(af)) return false;
+    var allowHighAac = !!(opts && opts.allowHighAac);
+    var hasOpus = false;
+    var hasHighAac = false;
     for (var i = 0; i < af.length; i++) {
       var parsed = parseMimeType(af[i] && af[i].mimeType);
-      if (parsed && parsed.kind === 'audio' && primaryFamily(parsed) === 'opus') return true;
+      if (parsed && parsed.kind === 'audio') {
+        var fam = primaryFamily(parsed);
+        if (fam === 'opus') hasOpus = true;
+        if (allowHighAac && isHighQualityAac(af[i], parsed)) hasHighAac = true;
+      }
     }
-    return false;
+    if (allowHighAac && hasHighAac) return false;
+    return hasOpus;
   }
 
   /**
@@ -316,6 +341,7 @@
     sabr: false,
     vp9Heights: [],
     opusAvailable: false,
+    highAacAvailable: false,
     nudgedFor: {},
     lastVideoData: null,
     lastSummary: null,
@@ -382,7 +408,9 @@
       var vid = (json.videoDetails && json.videoDetails.videoId) || null;
       var allowStrict = !!CONFIG.STRICT_AUDIO && !!state.opusBase &&
         !(vid && state.strictDisengagedFor[vid]);
-      var shouldEngage = shouldEngageStrictAudio(json.streamingData, allowStrict);
+      var shouldEngage = shouldEngageStrictAudio(json.streamingData, allowStrict, {
+        allowHighAac: !!CONFIG.ALLOW_HIGH_AUDIO_AAC
+      });
       // Per-video decision is always recorded; the global flag is only used as
       // a fallback when the live player has not reported a video id yet (see
       // isStrictEngagedNow), so a prefetched response for another video can
@@ -410,6 +438,7 @@
       state.sabr = !!summary.sabr;
       var heights = [];
       var opus = false;
+      var highAac = false;
       var audioFormats = [];
       var af = (json.streamingData && json.streamingData.adaptiveFormats) || [];
       af.forEach(function (f) {
@@ -418,6 +447,7 @@
         if (parsed.kind === 'audio') {
           var fam = primaryFamily(parsed);
           if (fam === 'opus') opus = true;
+          if (isHighQualityAac(f, parsed)) highAac = true;
           audioFormats.push({
             itag: f.itag != null ? f.itag : null,
             codec: parsed.codecs.join(','),
@@ -431,6 +461,7 @@
       });
       state.vp9Heights = heights;
       state.opusAvailable = opus;
+      state.highAacAvailable = highAac;
       state.lastAudioFormats = audioFormats;
     } catch (e) {}
   }
@@ -925,7 +956,7 @@
 
   // ---- Debug API (use from the DevTools console) ----
   window.__VP9OPUS = {
-    version: '0.2.4',
+    version: '0.2.5',
     config: CONFIG,
     state: state,
     toggleVerbose: function () { CONFIG.VERBOSE = !CONFIG.VERBOSE; log('VERBOSE =', CONFIG.VERBOSE); return CONFIG.VERBOSE; },
@@ -939,10 +970,11 @@
         setStrictEngagement(false, vid, 'toggle-off');
       } else {
         // Re-engage right away when the last player response for this video
-        // actually offered Opus (otherwise wait for the next response).
+        // actually offered Opus and was not bypassed by high-quality AAC.
         if (vid) delete state.strictDisengagedFor[vid];
         var sameVideo = !vid || !state.lastVideoId || vid === state.lastVideoId;
-        setStrictEngagement(!!(state.opusAvailable && sameVideo), vid, 'toggle-on');
+        var canEngage = state.opusAvailable && sameVideo && (!CONFIG.ALLOW_HIGH_AUDIO_AAC || !state.highAacAvailable);
+        setStrictEngagement(!!canEngage, vid, 'toggle-on');
       }
       log('STRICT_AUDIO =', CONFIG.STRICT_AUDIO, vid ? '(video=' + vid + ')' : '');
       return CONFIG.STRICT_AUDIO;
@@ -954,6 +986,7 @@
       try { engagedNow = isStrictEngagedNow(); } catch (e) {}
       return {
         strictAudioEnabled: !!CONFIG.STRICT_AUDIO,
+        allowHighAudioAac: !!CONFIG.ALLOW_HIGH_AUDIO_AAC,
         engaged: !!state.strictEngaged,
         engagedNowForCurrentVideo: engagedNow,
         currentVideoId: vid,
@@ -962,6 +995,8 @@
         opusSupport: state.opusBase,
         vp9Support: state.vp9Base,
         sabr: state.sabr,
+        opusAvailable: state.opusAvailable,
+        highAacAvailable: !!state.highAacAvailable,
         current: state.lastVideoData,
         audioFormats: (state.lastAudioFormats || []).slice(),
         events: state.strictEvents.slice(-10)
@@ -969,7 +1004,7 @@
     },
     dump: function () {
       return {
-        version: '0.2.4',
+        version: '0.2.5',
         host: location.host,
         config: JSON.parse(JSON.stringify(CONFIG)),
         responsesProcessed: state.responsesProcessed,
@@ -978,6 +1013,7 @@
         currentVideoId: state.currentVideoId,
         sabr: state.sabr,
         opusAvailable: state.opusAvailable,
+        highAacAvailable: !!state.highAacAvailable,
         vp9Heights: state.vp9Heights.slice(),
         current: state.lastVideoData,
         lastSummary: state.lastSummary,

@@ -15,7 +15,7 @@ if (!match) throw new Error('Markers /* __CORE_START__ */ / /* __CORE_END__ */ n
 
 const core = new Function(
   '"use strict";\n' + match[1] +
-  '\nreturn { parseMimeType, codecFamily, primaryFamily, tierKey, hasFamily, shouldEngageStrictAudio, prioritizeFormats, prioritizeStreamingData, strictBlockMime, isSafeVp9Promotion, isSafeOpusPromotion, STRICT_BLOCKED_AUDIO_FAMILIES };'
+  '\nreturn { parseMimeType, codecFamily, primaryFamily, tierKey, hasFamily, isHighQualityAac, shouldEngageStrictAudio, prioritizeFormats, prioritizeStreamingData, strictBlockMime, isSafeVp9Promotion, isSafeOpusPromotion, STRICT_BLOCKED_AUDIO_FAMILIES };'
 )();
 
 let passed = 0, failed = 0;
@@ -171,9 +171,47 @@ t('does not engage without any Opus variant', () =>
   }, true), false));
 t('does not engage when strict audio is disabled', () =>
   eq(core.shouldEngageStrictAudio({ adaptiveFormats: [{ itag: 251, mimeType: 'audio/webm; codecs="opus"' }] }, false), false));
+t('smart mode: does not engage when high-quality AAC (itag 141) exists and allowHighAac is true', () =>
+  eq(core.shouldEngageStrictAudio({
+    adaptiveFormats: [
+      { itag: 141, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 256000 },
+      { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 128000 },
+      { itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 160000 }
+    ]
+  }, true, { allowHighAac: true }), false));
+t('smart mode: still engages when only standard AAC exists even with allowHighAac', () =>
+  eq(core.shouldEngageStrictAudio({
+    adaptiveFormats: [
+      { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 128000 },
+      { itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 160000 }
+    ]
+  }, true, { allowHighAac: true }), true));
+t('smart mode: engages when allowHighAac is false even if high-quality AAC exists', () =>
+  eq(core.shouldEngageStrictAudio({
+    adaptiveFormats: [
+      { itag: 141, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 256000 },
+      { itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 160000 }
+    ]
+  }, true, { allowHighAac: false }), true));
 t('null/empty safe', () => {
   eq(core.shouldEngageStrictAudio(null, true), false);
   eq(core.shouldEngageStrictAudio({}, true), false);
+});
+
+console.log('isHighQualityAac');
+t('identifies itag 141 as high quality AAC', () => {
+  eq(core.isHighQualityAac({ itag: 141, mimeType: 'audio/mp4; codecs="mp4a.40.2"' }), true);
+});
+t('identifies AUDIO_QUALITY_HIGH as high quality AAC', () => {
+  eq(core.isHighQualityAac({ audioQuality: 'AUDIO_QUALITY_HIGH', mimeType: 'audio/mp4; codecs="mp4a.40.2"' }), true);
+});
+t('identifies bitrate >= 200000 as high quality AAC', () => {
+  eq(core.isHighQualityAac({ bitrate: 256000, mimeType: 'audio/mp4; codecs="mp4a.40.2"' }), true);
+});
+t('returns false for standard AAC and non-AAC', () => {
+  eq(core.isHighQualityAac({ itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 128000 }), false);
+  eq(core.isHighQualityAac({ itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 160000 }), false);
+  eq(core.isHighQualityAac(null), false);
 });
 
 console.log('hasFamily');

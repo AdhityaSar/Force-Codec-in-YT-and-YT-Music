@@ -404,6 +404,48 @@ console.log('strict audio per-video');
   });
 }
 
+// Smart mode: high-quality AAC (itag 141) is not blocked on YT Music
+{
+  const env = makeEnv();
+  env.run();
+  const api = env.api();
+  const RESPONSE_PREMIUM = {
+    videoDetails: { videoId: 'VID_PREMIUM' },
+    streamingData: {
+      adaptiveFormats: [
+        { itag: 141, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 256000 },
+        { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 128000 },
+        { itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 160000 }
+      ]
+    }
+  };
+  env.player.videoId = 'VID_PREMIUM';
+  env.setBody(RESPONSE_PREMIUM);
+  await env.sandbox.window.fetch(PLAYER_URL);
+
+  t('smart mode: high-quality AAC does not engage strict blocking', () => {
+    eq(api.audio().highAacAvailable, true);
+    eq(api.audio().engagedNowForCurrentVideo, false);
+    ok(env.mediaSource.isTypeSupported(AAC), 'AAC must remain playable for 256k tier');
+  });
+
+  api.config.ALLOW_HIGH_AUDIO_AAC = false;
+  await env.sandbox.window.fetch(PLAYER_URL);
+  t('smart mode: disabling ALLOW_HIGH_AUDIO_AAC re-enables strict blocking', () => {
+    eq(api.audio().engagedNowForCurrentVideo, true);
+    eq(env.mediaSource.isTypeSupported(AAC), false);
+  });
+
+  t('smart mode: toggleStrictAudio respects ALLOW_HIGH_AUDIO_AAC and highAacAvailable', () => {
+    api.config.ALLOW_HIGH_AUDIO_AAC = true;
+    api.toggleStrictAudio(); // turns off
+    eq(api.audio().engagedNowForCurrentVideo, false);
+    api.toggleStrictAudio(); // turns on, but high AAC is present -> does not engage
+    eq(api.audio().engagedNowForCurrentVideo, false);
+    ok(env.mediaSource.isTypeSupported(AAC));
+  });
+}
+
 // Per-video engagement history is bounded to avoid growing for the lifetime
 // of a long-running YouTube tab.
 {
