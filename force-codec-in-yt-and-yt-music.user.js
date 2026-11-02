@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube VP9 + Opus Prioritizer
 // @namespace    https://github.com/AdhityaSar/Force-Codec-in-YT-and-YT-Music
-// @version      0.2.3
+// @version      0.2.4
 // @description  Prioritize VP9 (video) & Opus (audio) on YouTube & YouTube Music. Does NOT block other codecs - only raises their priority; AVC/AAC/AV1 fallback keeps working. Optional Strict Audio Mode on YT Music (engages only when Opus exists, with auto-failsafe).
 // @author       AdhityaSar
 // @license      MIT
@@ -312,6 +312,7 @@
   var state = {
     lastVideoId: null,
     currentVideoId: null,      // video id reported by the live player (per-video strict decision)
+    lastStrictVideoId: null,
     sabr: false,
     vp9Heights: [],
     opusAvailable: false,
@@ -485,7 +486,9 @@
       trackKey(state.strictEngagedFor, vid);
       state.strictEngagedFor[vid] = next;
     }
-    if (state.strictEngaged === next) return;
+    var sameVideo = !!(vid && state.lastStrictVideoId === vid);
+    if (state.strictEngaged === next && (!vid || sameVideo)) return;
+    state.lastStrictVideoId = vid || null;
     state.strictEngaged = next;
     state.strictEvents.push({
       t: Date.now(),
@@ -651,14 +654,17 @@
 
     XMLHttpRequest.prototype.open = function (method, url) {
       try {
-        if (isPlayerApiUrl(url)) {
-          this.__ypfIsPlayer = true;
+        var isPlayer = isPlayerApiUrl(url);
+        this.__ypfIsPlayer = isPlayer;
+        this.__ypfDone = false;
+        this.__ypfText = null;
+        if (isPlayer) {
           var self = this;
           Object.defineProperty(this, 'responseText', {
             configurable: true,
             get: function () {
               var rt = self.responseType;
-              if (rt && rt !== 'text') return nativeRead(self, 'responseText');
+              if (!self.__ypfIsPlayer || (rt && rt !== 'text')) return nativeRead(self, 'responseText');
               ensureProcessed(self);
               return self.__ypfText != null ? self.__ypfText : nativeRead(self, 'responseText');
             }
@@ -667,7 +673,7 @@
             configurable: true,
             get: function () {
               var rt = self.responseType;
-              if (rt && rt !== 'text') return nativeRead(self, 'response');
+              if (!self.__ypfIsPlayer || (rt && rt !== 'text')) return nativeRead(self, 'response');
               ensureProcessed(self);
               return self.__ypfText != null ? self.__ypfText : nativeRead(self, 'response');
             }
@@ -857,7 +863,7 @@
       // no-op; the player may ignore it entirely.
       if (CONFIG.ENABLE_NUDGE && !vOk && d.videoCoding && !state.nudgedFor[vid]) {
         var h = currentHeight(d.quality);
-        if (h != null && state.vp9Heights.indexOf(h) !== -1) {
+        if (h != null && (!d.video_id || d.video_id === state.lastVideoId) && state.vp9Heights.indexOf(h) !== -1) {
           trackKey(state.nudgedFor, vid);
           try {
             var q = typeof p.getPlaybackQuality === 'function' ? p.getPlaybackQuality() : null;
@@ -919,7 +925,7 @@
 
   // ---- Debug API (use from the DevTools console) ----
   window.__VP9OPUS = {
-    version: '0.2.3',
+    version: '0.2.4',
     config: CONFIG,
     state: state,
     toggleVerbose: function () { CONFIG.VERBOSE = !CONFIG.VERBOSE; log('VERBOSE =', CONFIG.VERBOSE); return CONFIG.VERBOSE; },
@@ -963,7 +969,7 @@
     },
     dump: function () {
       return {
-        version: '0.2.3',
+        version: '0.2.4',
         host: location.host,
         config: JSON.parse(JSON.stringify(CONFIG)),
         responsesProcessed: state.responsesProcessed,

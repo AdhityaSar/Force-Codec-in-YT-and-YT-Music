@@ -174,7 +174,7 @@ function makeEnv(host = 'music.youtube.com') {
       if (i !== -1) timers.splice(i, 1);
     }
   };
-  sandbox.XMLHttpRequest = makeXHRClass(() => xhrBody);
+  sandbox.XMLHttpRequest = makeXHRClass((url) => (url && url.includes('/youtubei/v1/player')) ? xhrBody : 'non-player');
 
   function advance(ms) {
     const target = now + ms;
@@ -331,6 +331,12 @@ console.log('XHR hook');
   });
   t('response mirrors responseText', () => eq(xhr.response, text));
   t('no runtime error was thrown', () => eq(env.errors.map((e) => e.message), []));
+
+  xhr.open('GET', 'https://music.youtube.com/other');
+  xhr.send();
+  t('reused XHR resets state for non-player url', () => {
+    eq(xhr.responseText, 'non-player');
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -467,6 +473,27 @@ async function engagedEnv(time) {
   env.player.time = 18;
   env.advance(6000);
   t('healthy buffering does not trigger a reload', () => eq(env.player.reloads.length, 0));
+}
+{
+  // Consecutive Opus tracks: watchdog arms for subsequent videos too.
+  const env = await engagedEnv(10);
+  env.player.videoId = 'VID_NEXT';
+  env.player.time = 0;
+  env.setBody({
+    videoDetails: { videoId: 'VID_NEXT' },
+    streamingData: {
+      adaptiveFormats: [{ itag: 251, mimeType: 'audio/webm; codecs="opus"' }]
+    }
+  });
+  await env.sandbox.window.fetch(PLAYER_URL);
+  env.player.state = 3;
+  env.advance(9100);
+  t('watchdog arms for consecutive Opus track and recovers stuck buffer', () => {
+    eq(env.player.reloads.length, 1);
+    eq(env.player.reloads[0], ['VID_NEXT', 0]);
+    const events = env.api().audio().events.map((e) => e.video);
+    ok(events.includes(VID_B) && events.includes('VID_NEXT'));
+  });
 }
 {
   // Playing (state 1) with a frozen position must never trigger a reload.

@@ -53,6 +53,37 @@ It also ships an optional **Strict Audio Mode** (on by default only on `music.yo
 
 > Note: Strict Audio Mode is always **Opus-based**. Changing `AUDIO_PREFER` (e.g. to `aac`) only changes the *prioritization* order; the strict blocking list stays AAC/Vorbis/FLAC/MP3.
 
+## Opus vs AAC on YouTube Music
+
+A common question when configuring `AUDIO_PREFER` or using Strict Audio Mode is whether **Opus** or **AAC** is better on YouTube Music:
+
+| Scenario | Recommended Codec | Why |
+|---|---|---|
+| **Free / Standard Account** | **Opus** | At standard bitrates (~128 kbps), Opus is vastly superior to AAC-LC in detail, soundstage, and high-frequency retention. |
+| **Premium ("Always High")** | **AAC (256 kbps)** | YouTube serves AAC up to **256 kbps** (`itag 141`), but caps Opus at **~160 kbps** (`itag 251`). Raw bitrate wins here for critical listening. |
+| **Bandwidth / Mobile Data Saver** | **Opus** | Reaches subjective transparency at ~35–40% lower bandwidth compared to 256 kbps AAC. |
+| **Apple Devices (iOS / macOS)** | **AAC** | Fully hardware-accelerated on Apple Silicon and CoreAudio pipelines, optimizing battery efficiency. |
+
+### Technical Details
+
+1. **Bitrate Tiers on YouTube Music**:
+   - **Free Users**:
+     - **AAC**: ~128 kbps (`itag 140`)
+     - **Opus**: ~128–160 kbps VBR (`itag 251`)
+     - *Verdict*: **Opus wins hands down**. Opus's hybrid SILK + CELT/MDCT engine handles low-to-medium bitrates far better than older AAC-LC, preventing the muffled treble and compression artifacts typical of 128 kbps AAC.
+   - **Premium Users ("High quality" audio setting)**:
+     - **AAC**: **256 kbps** (`itag 141`, 44.1 kHz, stereo)
+     - **Opus**: **~160 kbps VBR** (`itag 251`, 48 kHz, stereo)
+     - *Verdict*: YouTube **does not offer Opus at 256 kbps**. While Opus is roughly 20–30% more efficient than AAC at equivalent bitrates, AAC at **256 kbps** delivers more raw bandwidth and an uncompromised high-frequency cutoff (~20–22 kHz). For listeners with dedicated DACs, IEMs, or studio headphones, AAC 256 kbps preserves micro-details better.
+
+2. **Codec Efficiency & Device Playback**:
+   - **Opus**: Open IETF standard, dynamic VBR, ultra-low latency. Reaches transparent fidelity for most ears around 128–160 kbps. Decoded in software on most platforms, though modern CPUs handle it with near-zero overhead.
+   - **AAC-LC**: Mature commercial standard. Requires higher bitrates (≥ 256 kbps) for complete transparency. Widely backed by dedicated hardware decoders across almost every mobile and desktop SoC.
+
+### Userscript Configuration Advice
+- If you have **YouTube Music Premium** and prioritize absolute sound fidelity on high-end listening gear, you may prefer native **AAC** (set `AUDIO_PREFER: 'aac'` or keep `STRICT_AUDIO: false` on YT Music).
+- If you use **Free YouTube Music**, are on a metered connection, or prefer Opus's acoustic profile, keep the defaults (`AUDIO_PREFER: 'opus'` with `STRICT_AUDIO: true`).
+
 ## Known limitations
 
 - **SABR (Server ABR)**: YouTube is gradually moving format selection to the server side. The script detects SABR and still prioritizes the client-side format list, but the final choice may be made by the server — verify with Stats for nerds. Because the script **must not block** other codecs, a 100% guarantee on every video is impossible; what is guaranteed is: no codec is ever blocked and the fallback always works.
