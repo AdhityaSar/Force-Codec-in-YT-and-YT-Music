@@ -77,10 +77,15 @@
 
   var VIDEO_FAMILIES = ['vp9', 'vp8', 'av1', 'avc', 'hevc'];
   var AUDIO_FAMILIES = ['opus', 'aac', 'flac', 'vorbis', 'mp3'];
+  var MIME_PARSE_CACHE_LIMIT = 128;
+  var mimeParseCache = Object.create(null);
+  var mimeParseCacheKeys = [];
 
   /** 'video/webm; codecs="vp09.00.51.08"' -> {container, kind, codecs[]} */
   function parseMimeType(mime) {
     if (typeof mime !== 'string' || mime.indexOf('/') === -1) return null;
+    // Parsed records are shared, so callers must treat them as read-only.
+    if (Object.prototype.hasOwnProperty.call(mimeParseCache, mime)) return mimeParseCache[mime];
     var s = mime.trim();
     var semi = s.indexOf(';');
     var container = (semi === -1 ? s : s.slice(0, semi)).trim().toLowerCase();
@@ -95,7 +100,13 @@
         if (t) codecs.push(t);
       });
     }
-    return { container: container, kind: kind, codecs: codecs };
+    var parsed = { container: container, kind: kind, codecs: codecs };
+    if (mimeParseCacheKeys.length >= MIME_PARSE_CACHE_LIMIT) {
+      delete mimeParseCache[mimeParseCacheKeys.shift()];
+    }
+    mimeParseCache[mime] = parsed;
+    mimeParseCacheKeys.push(mime);
+    return parsed;
   }
 
   /** Map any codec string (profile string) to a simple family. */
