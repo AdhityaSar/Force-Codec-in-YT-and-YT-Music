@@ -15,7 +15,7 @@ if (!match) throw new Error('Markers /* __CORE_START__ */ / /* __CORE_END__ */ n
 
 const core = new Function(
   '"use strict";\n' + match[1] +
-  '\nreturn { parseMimeType, codecFamily, primaryFamily, tierKey, hasFamily, isHighQualityAac, shouldEngageStrictAudio, prioritizeFormats, prioritizeStreamingData, strictBlockMime, isSafeVp9Promotion, isSafeOpusPromotion, STRICT_BLOCKED_AUDIO_FAMILIES };'
+  '\nreturn { parseMimeType, MIME_PARSE_CACHE_LIMIT, codecFamily, primaryFamily, tierKey, hasFamily, isHighQualityAac, shouldEngageStrictAudio, prioritizeFormats, prioritizeStreamingData, strictBlockMime, isSafeVp9Promotion, isSafeOpusPromotion, STRICT_BLOCKED_AUDIO_FAMILIES };'
 )();
 
 let passed = 0, failed = 0;
@@ -49,6 +49,15 @@ t('unquoted and single-quoted codecs', () => {
   eq(p2.kind, 'audio'); eq(p2.codecs, ['opus']);
   const p3 = core.parseMimeType('  video/webm; codecs=vp9  ');
   eq(p3.kind, 'video'); eq(p3.codecs, ['vp9']);
+});
+t('memoizes repeated MIME strings and evicts old entries at the cache limit', () => {
+  const mime = 'audio/webm; codecs="cache-test"';
+  const first = core.parseMimeType(mime);
+  ok(core.parseMimeType(mime) === first, 'repeated MIME strings should reuse the parsed result');
+  for (let i = 0; i < core.MIME_PARSE_CACHE_LIMIT; i++) {
+    core.parseMimeType('audio/x-cache-' + i + '; codecs="test' + i + '"');
+  }
+  ok(core.parseMimeType(mime) !== first, 'the cache should evict old entries when full');
 });
 t('invalid input -> null', () => eq(core.parseMimeType(undefined), null));
 
@@ -286,5 +295,4 @@ t('opus outside webm is not promoted', () => {
 
 console.log('\nResults: ' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) process.exit(1);
-
 
