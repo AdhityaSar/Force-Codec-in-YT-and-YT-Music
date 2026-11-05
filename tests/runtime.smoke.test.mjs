@@ -596,5 +596,122 @@ console.log('verification & nudge');
   });
 }
 
+// --------------------------------------------------------------------------
+// Regression: long YT Music sessions (Premium smart audio)
+// --------------------------------------------------------------------------
+
+console.log('long-session regressions');
+{
+  // (1) The very first player response of a page load (the
+  // ytInitialPlayerResponse trap) runs BEFORE installCapabilityPromotion(), so
+  // the strict decision used to be made with state.opusBase === false and the
+  // video was permanently recorded as "disengaged" for that page session.
+  const env = makeEnv();
+  env.player.videoId = VID_B;
+  env.sandbox.window.ytInitialPlayerResponse = {
+    videoDetails: { videoId: VID_B },
+    streamingData: {
+      adaptiveFormats: [
+        { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM' },
+        { itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_MEDIUM' }
+      ]
+    }
+  };
+  env.run();
+  t('document-start response is judged with the capability base known', () => {
+    eq(env.api().audio().engagedNowForCurrentVideo, true, 'strict must be able to engage for the first track');
+    eq(env.mediaSource.isTypeSupported(AAC), false, 'AAC must be blocked while engaged');
+  });
+}
+{
+  // (2) Blocking must never be based on a video the player is not known to be
+  // playing: during a YT Music track transition getVideoData() has no
+  // video_id, and the stale global flag used to block AAC for the wrong track.
+  const env = makeEnv();
+  env.run();
+  env.player.videoId = VID_B;
+  env.setBody(RESPONSE_B);
+  await env.sandbox.window.fetch(PLAYER_URL);
+  eq(env.api().audio().engagedNowForCurrentVideo, true, 'precondition: engaged for VID_B');
+  env.player.getVideoData = () => ({});   // transition / no id reported
+  t('unknown current video never blocks audio (fail-open)', () => {
+    eq(env.api().audio().engagedNowForCurrentVideo, false);
+    ok(env.mediaSource.isTypeSupported(AAC), 'AAC must stay playable when the playing video is unknown');
+  });
+}
+{
+  // (3) Diagnostics for the "stuck at 251" report: what was actually blocked.
+  const env = makeEnv();
+  env.run();
+  env.player.videoId = VID_B;
+  env.setBody(RESPONSE_B);
+  await env.sandbox.window.fetch(PLAYER_URL);
+  env.mediaSource.isTypeSupported(AAC);
+  const tr = env.api().trace();
+  t('trace records each player response with its audio evidence', () => {
+    eq(tr.responses.length, 1);
+    eq(tr.responses[0].video, VID_B);
+    eq(tr.responses[0].highAac, false);
+    eq(tr.responses[0].opus, true);
+    eq(tr.responses[0].engaged, true);
+    ok(tr.responses[0].itags.length === 2, 'audio itags must be recorded');
+  });
+  t('trace records blocked capability probes', () => {
+    ok(tr.blocked > 0, 'a blocked probe must be counted, got ' + tr.blocked);
+  });
+}
+{
+  // Premium "High" can be delivered as 774 (Opus 256k) alone. Smart mode must
+  // leave AAC playable then, so the codec of that track no longer depends on
+  // which format list the server happened to return (774-only vs 141+774).
+  const env = makeEnv();
+  env.run();
+  env.player.videoId = 'VID_OPUS256';
+  env.setBody({
+    videoDetails: { videoId: 'VID_OPUS256' },
+    streamingData: {
+      adaptiveFormats: [
+        { itag: 774, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 263000 },
+        { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 130000 },
+        { itag: 137, mimeType: 'video/mp4; codecs="avc1.640028"', height: 1080, fps: 30 }
+      ]
+    }
+  });
+  await env.sandbox.window.fetch(PLAYER_URL);
+  t('774-only response keeps AAC playable (no strict block)', () => {
+    eq(env.api().audio().engagedNowForCurrentVideo, false, 'strict must not engage when a 256k Opus exists');
+    ok(env.mediaSource.isTypeSupported(AAC), 'AAC must stay playable');
+    eq(env.api().audio().highAudioAvailable, true, '774 must be reported as high-quality audio');
+  });
+}
+
+{
+  // YT Music's getVideoData() has no audioCoding (verified live). The codec
+  // actually playing must come from getStatsForNerds().codecs, otherwise the
+  // script cannot tell "stuck on 251" apart from "fine" on music.youtube.com.
+  const env = makeEnv();
+  env.run();
+  const api = env.api();
+  env.player.videoId = VID_B;
+  env.player.getVideoData = () => ({ video_id: VID_B, video_quality: 'medium' });
+  env.player.getStatsForNerds = () => ({ codecs: 'vp09.00.51.08.01.01.01.01.00 (243) / opus (774)' });
+  env.setBody(RESPONSE_B);
+  await env.sandbox.window.fetch(PLAYER_URL);
+  api.check();
+  t('codec is read from Stats for nerds when getVideoData is silent', () => {
+    const d = api.state.lastVideoData;
+    eq(d.audioCoding, 'opus');
+    eq(d.itag, 774);
+    eq(d.source, 'stats');
+    ok(api.dump().current != null);
+  });
+  t('player codec check is recorded in the trace', () => {
+    const c = api.trace().checks;
+    eq(c.length, 1);
+    eq(c[0].audioItag, 774);
+    eq(c[0].src, 'stats');
+  });
+}
+
 console.log('\nResults: ' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) process.exit(1);

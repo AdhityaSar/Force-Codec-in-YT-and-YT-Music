@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube VP9 + Opus Prioritizer
 // @namespace    https://github.com/AdhityaSar/Force-Codec-in-YT-and-YT-Music
-// @version      0.2.5
+// @version      0.2.7
 // @description  Prioritize VP9 (video) & Opus (audio) on YouTube & YouTube Music. Does NOT block other codecs - only raises their priority; AVC/AAC/AV1 fallback keeps working. Optional Strict Audio Mode on YT Music (engages only when Opus exists, with auto-failsafe).
 // @author       AdhityaSar
 // @license      MIT
@@ -40,12 +40,28 @@
  *      on any codec-related media error or genuinely stuck buffering.
  *      Video *codecs* are never blocked, but MP4 muxed streams that contain
  *      AAC are also reported unsupported while engaged (they carry AAC audio).
+ *      Engagement is per-video: when the player reports no video id (track
+ *      transition, ad break, player API unavailable) nothing is blocked, and a
+ *      stale decision from a prefetched response can never leak into the track
+ *      that is actually loading.
+ *   5) Smart Audio Mode (ALLOW_HIGH_AUDIO_AAC, YT Music only): when the
+ *      response offers a high-fidelity stream of ANY family - itag 141
+ *      (AAC 256k), itag 774 (Opus 256k) or >= 200 kbps - strict blocking
+ *      stands down. Inside a quality tier the sort compares best bitrate per
+ *      family: the configured preference wins a tie, a +20% bitrate wins over
+ *      it (141/258k beats 251/136k; 774/263k vs 141/258k keeps the preference).
+ *      Premium "High" is delivered as 141 *and* 774, so gating on 141 alone made
+ *      a track's codec depend on which format list the server returned.
  *
  * Quick debug (DevTools console):
  *   __VP9OPUS.dump()            -> status summary
  *   __VP9OPUS.toggleVerbose()   -> verbose per-format logging
  *   __VP9OPUS.check()           -> check codecs of the currently playing video
  *   __VP9OPUS.audio()           -> strict audio mode & audio format diagnostics
+ *   __VP9OPUS.trace()           -> per-response evidence: what each player
+ *                                  response offered (opus/highAac/itags), the
+ *                                  decision taken, and what got blocked
+ *                                  ("codec stuck?" -> look here first)
  */
 
 (function () {
@@ -73,7 +89,7 @@
   // do not use browser APIs inside this block.
   // ===================================================================
 
-  var CORE_DEFAULTS = { videoPrefer: 'vp9', audioPrefer: 'opus' };
+  var CORE_DEFAULTS = { videoPrefer: 'vp9', audioPrefer: 'opus', smartAac: false };
 
   var VIDEO_FAMILIES = ['vp9', 'vp8', 'av1', 'avc', 'hevc'];
   var AUDIO_FAMILIES = ['opus', 'aac', 'flac', 'vorbis', 'mp3'];
@@ -149,6 +165,26 @@
     return false;
   }
 
+  // YT Music Premium "High" audio is delivered as AAC 256k (itag 141) *and*
+  // Opus 256k (itag 774). Both are the same bitrate class; only the codec
+  // differs, so any logic that means "a high-fidelity stream exists" must look
+  // at both families instead of assuming Opus caps at ~160k (itag 251).
+  var HIGH_QUALITY_AUDIO_ITAGS = [141, 774];
+
+  /**
+   * True when a format is a high-fidelity audio stream of ANY family:
+   * a known Premium "High" itag (141/774) or >= 200 kbps. Bitrate is the
+   * reliable discriminator — audioQuality is not, because 'AUDIO_QUALITY_HIGH'
+   * can also label 251 (~136 kbps).
+   */
+  function isHighQualityAudio(f, parsed) {
+    if (!f) return false;
+    var p = parsed || parseMimeType(f.mimeType);
+    if (!p || p.kind !== 'audio') return false;
+    if (HIGH_QUALITY_AUDIO_ITAGS.indexOf(f.itag) !== -1) return true;
+    return typeof f.bitrate === 'number' && f.bitrate >= 200000;
+  }
+
   /**
    * True when a format represents high-tier AAC (e.g. YT Music Premium
    * 256 kbps AAC, itag 141, or audioQuality AUDIO_QUALITY_HIGH).
@@ -178,16 +214,58 @@
     var allowHighAac = !!(opts && opts.allowHighAac);
     var hasOpus = false;
     var hasHighAac = false;
+    var hasHighAudio = false;
     for (var i = 0; i < af.length; i++) {
       var parsed = parseMimeType(af[i] && af[i].mimeType);
       if (parsed && parsed.kind === 'audio') {
         var fam = primaryFamily(parsed);
         if (fam === 'opus') hasOpus = true;
-        if (allowHighAac && isHighQualityAac(af[i], parsed)) hasHighAac = true;
+        if (isHighQualityAudio(af[i], parsed)) {
+          hasHighAudio = true;
+          if (fam === 'aac') hasHighAac = true;
+        }
       }
     }
-    if (allowHighAac && hasHighAac) return false;
+    // Smart mode stands down whenever a high-fidelity stream exists at all
+    // (AAC 141 *or* Opus 774): forcing Opus must never downgrade a 256k tier,
+    // and blocking is only justified when the response offers no such stream.
+    if (allowHighAac && (hasHighAudio || hasHighAac)) return false;
     return hasOpus;
+  }
+
+  /**
+   * Highest bitrate available for one family inside a tier group (null when the
+   * response carries no bitrate information, e.g. some SABR payloads).
+   */
+  function groupBestBitrate(g, family) {
+    var best = null;
+    for (var i = 0; i < g.length; i++) {
+      if (g[i].family !== family) continue;
+      var b = g[i].f && g[i].f.bitrate;
+      if (typeof b === 'number' && (best == null || b > best)) best = b;
+    }
+    return best;
+  }
+
+  // A different codec family only overrides the user's preference when it is
+  // substantially better (+20%): 141 (258k) vs 251 (136k) is a real upgrade,
+  // 774 (263k) vs 141 (258k) is encoder variance and the preference wins.
+  var AUDIO_BITRATE_OVERRIDE = 1.2;
+
+  /**
+   * Preferred audio family for one tier group. Smart Audio Mode compares the
+   * best bitrate per family so the sort never pushes a lower-bitrate stream
+   * ahead of a clearly better one (the old behaviour that made a Premium track
+   * land on Opus 251 while 256k AAC/Opus was available in another response).
+   */
+  function pickAudioFamily(g, o) {
+    var prefer = o.audioPrefer;
+    if (!o.smartAac) return prefer;
+    var other = prefer === 'aac' ? 'opus' : 'aac';
+    var pb = groupBestBitrate(g, prefer);
+    var ob = groupBestBitrate(g, other);
+    if (pb != null && ob != null && ob > pb * AUDIO_BITRATE_OVERRIDE) return other;
+    return prefer;
   }
 
   /**
@@ -208,7 +286,6 @@
         f: f,
         parsed: parsed,
         family: primaryFamily(parsed),
-        prefer: (parsed && parsed.kind === 'audio') ? o.audioPrefer : o.videoPrefer,
         tier: tierKey(f, parsed)
       };
     });
@@ -229,8 +306,10 @@
     groups.forEach(function (g) {
       if (g.length < 2) return;
       groupCount++;
-      var preferred = g.filter(function (x) { return x.family === x.prefer; });
-      var others = g.filter(function (x) { return x.family !== x.prefer; });
+      var kind = (g[0].parsed && g[0].parsed.kind) || 'video';
+      var prefer = kind === 'audio' ? pickAudioFamily(g, o) : o.videoPrefer;
+      var preferred = g.filter(function (x) { return x.family === prefer; });
+      var others = g.filter(function (x) { return x.family !== prefer; });
       var merged = preferred.concat(others); // filter() preserves order -> stable
       for (var j = 0; j < g.length; j++) {
         result[g[j].i] = merged[j].f;
@@ -321,6 +400,32 @@
     return /vp0?9/i.test(t);
   }
 
+  /**
+   * Parse the codec row of YouTube's "Stats for nerds"
+   * (`getStatsForNerds().codecs`, e.g. 'vp09.00.51.08.01.01.01.01.00 (243) / opus (251)').
+   * YT Music's getVideoData() reports no audioCoding at all, so this is the only
+   * way to see which codec is *actually* playing there.
+   */
+  function parseStatsCodecs(str) {
+    var out = { raw: typeof str === 'string' ? str : '', video: null, audio: null, videoItag: null, audioItag: null };
+    if (typeof str !== 'string' || !str) return out;
+    var parts = str.split('/');
+    for (var i = 0; i < parts.length; i++) {
+      var seg = parts[i].trim();
+      if (!seg) continue;
+      var m = /\((\d+)\)/.exec(seg);
+      var itag = m ? parseInt(m[1], 10) : null;
+      var name = (m ? seg.slice(0, m.index) : seg).trim();
+      if (!name) continue;
+      if (AUDIO_FAMILIES.indexOf(codecFamily(name)) !== -1) {
+        if (out.audio == null) { out.audio = name; out.audioItag = itag; }
+      } else if (out.video == null) {
+        out.video = name; out.videoItag = itag;
+      }
+    }
+    return out;
+  }
+
   /** Opus promotion safety: only Opus inside WebM may be promoted. */
   function isSafeOpusPromotion(type) {
     if (typeof type !== 'string') return false;
@@ -342,6 +447,7 @@
     vp9Heights: [],
     opusAvailable: false,
     highAacAvailable: false,
+    highAudioAvailable: false,   // any >= 200 kbps / 141 / 774 stream (AAC or Opus)
     nudgedFor: {},
     lastVideoData: null,
     lastSummary: null,
@@ -357,6 +463,45 @@
     strictWatch: {}
   };
   var warned = {};
+
+  // ---- Capability base: probed once, BEFORE any player response is judged ----
+  // The ytInitialPlayerResponse trap and the fetch/XHR hooks can run before
+  // installCapabilityPromotion(). A strict-audio decision taken while the base
+  // was still unknown recorded the page's first video as "never engage", so the
+  // page needed a reload before strict mode behaved normally again.
+  var capabilityBase = { probed: false, vp9: false, opus: false };
+  function detectCapabilityBase() {
+    if (capabilityBase.probed) return capabilityBase;
+    capabilityBase.probed = true;
+    try {
+      var ms0 = window.MediaSource;
+      if (ms0 && typeof ms0.isTypeSupported === 'function') {
+        capabilityBase.vp9 = !!(ms0.isTypeSupported('video/webm; codecs="vp9"') ||
+                                ms0.isTypeSupported('video/webm; codecs="vp09"'));
+        capabilityBase.opus = !!ms0.isTypeSupported('audio/webm; codecs="opus"');
+      }
+    } catch (e) {}
+    state.vp9Base = capabilityBase.vp9;
+    state.opusBase = capabilityBase.opus;
+    return capabilityBase;
+  }
+  detectCapabilityBase();
+
+  // ---- Bounded diagnostic trace (see __VP9OPUS.trace()) ----
+  // Evidence for "the codec is stuck even though a better one was available":
+  // per player response we keep what the response actually offered and which
+  // decision was taken, plus a count of the capability probes we blocked.
+  var MAX_TRACE_RESPONSES = 60;
+  var MAX_TRACE_TYPES = 40;
+  var trace = { responses: [], checks: [], blocked: 0, blockedTypes: {} };
+  function traceResponse(rec) {
+    trace.responses.push(rec);
+    if (trace.responses.length > MAX_TRACE_RESPONSES) trace.responses.shift();
+  }
+  function traceCheck(rec) {
+    trace.checks.push(rec);
+    if (trace.checks.length > MAX_TRACE_RESPONSES) trace.checks.shift();
+  }
 
   // Bounded string-keyed map helpers (keeps long sessions from leaking keys).
   var MAX_TRACKED_KEYS = 200;
@@ -399,7 +544,8 @@
       if (!json || typeof json !== 'object' || !json.streamingData) return false;
       var summary = prioritizeStreamingData(json.streamingData, {
         videoPrefer: CONFIG.VIDEO_PREFER,
-        audioPrefer: CONFIG.AUDIO_PREFER
+        audioPrefer: CONFIG.AUDIO_PREFER,
+        smartAac: smartAacActive()
       });
       state.responsesProcessed++;
       if (summary.touched) state.rewritesApplied++;
@@ -416,6 +562,18 @@
       // isStrictEngagedNow), so a prefetched response for another video can
       // never block audio of the video that is actually playing.
       setStrictEngagement(shouldEngage, vid, srcLabel);
+      traceResponse({
+        t: Date.now(),
+        src: srcLabel || '',
+        video: vid,
+        sabr: !!summary.sabr,
+        opus: !!state.opusAvailable,
+        highAac: !!state.highAacAvailable,
+        highAudio: !!state.highAudioAvailable,
+        engaged: !!(vid && state.strictEngagedFor[vid]),
+        reordered: summary.videoMoved + summary.audioMoved,
+        itags: (state.lastAudioFormats || []).map(function (a) { return a.itag; })
+      });
       log('player response [' + srcLabel + '] video=' + (vid || '?') +
         ' -> moved: ' + summary.videoMoved + ' video / ' + summary.audioMoved + ' audio' +
         ' (adaptive=' + summary.adaptive + ', muxed=' + summary.muxed + ')' +
@@ -439,6 +597,7 @@
       var heights = [];
       var opus = false;
       var highAac = false;
+      var highAudio = false;
       var audioFormats = [];
       var af = (json.streamingData && json.streamingData.adaptiveFormats) || [];
       af.forEach(function (f) {
@@ -448,6 +607,7 @@
           var fam = primaryFamily(parsed);
           if (fam === 'opus') opus = true;
           if (isHighQualityAac(f, parsed)) highAac = true;
+          if (isHighQualityAudio(f, parsed)) highAudio = true;
           audioFormats.push({
             itag: f.itag != null ? f.itag : null,
             codec: parsed.codecs.join(','),
@@ -462,6 +622,7 @@
       state.vp9Heights = heights;
       state.opusAvailable = opus;
       state.highAacAvailable = highAac;
+      state.highAudioAvailable = highAudio;
       state.lastAudioFormats = audioFormats;
     } catch (e) {}
   }
@@ -488,14 +649,27 @@
   function isStrictEngagedNow() {
     if (!CONFIG.STRICT_AUDIO) return false;
     var vid = currentPlayingId();
-    if (vid) {
-      if (Object.prototype.hasOwnProperty.call(state.strictEngagedFor, vid)) {
-        return !!state.strictEngagedFor[vid];
-      }
-      // A response for this video was already seen and rejected -> stay native.
-      if (Object.prototype.hasOwnProperty.call(state.strictDisengagedFor, vid)) return false;
+    // No video id reported (the player is between videos, an ad break is
+    // running, or the player API is unavailable): fail open. The global flag
+    // then describes some *other* video's player response, and applying it here
+    // blocked AAC for the track the player was about to load - YT Music then
+    // stayed on Opus 251 for the rest of the session until a reload.
+    if (!vid) return false;
+    if (Object.prototype.hasOwnProperty.call(state.strictEngagedFor, vid)) {
+      return !!state.strictEngagedFor[vid];
     }
+    // A response for this video was already seen and rejected -> stay native.
+    if (Object.prototype.hasOwnProperty.call(state.strictDisengagedFor, vid)) return false;
+    // No decision recorded for this video (response not hooked yet): only trust
+    // the global flag when it actually belongs to the video being played.
+    if (vid !== state.lastVideoId) return false;
     return !!state.strictEngaged;
+  }
+
+  /** Smart Audio Mode: keep 256k AAC playable (YT Music only). */
+  function smartAacActive() {
+    try { return !!CONFIG.ALLOW_HIGH_AUDIO_AAC && location.host === 'music.youtube.com'; }
+    catch (e) { return !!CONFIG.ALLOW_HIGH_AUDIO_AAC; }
   }
 
   /**
@@ -508,7 +682,16 @@
     var engaged;
     try { engaged = isStrictEngagedNow(); } catch (e) { return false; }
     if (!engaged) return false;
-    return strictBlockMime(type, true);
+    var block = strictBlockMime(type, true);
+    if (block) {
+      trace.blocked++;
+      var key = String(type).slice(0, 80);
+      if (!Object.prototype.hasOwnProperty.call(trace.blockedTypes, key)) {
+        if (Object.keys(trace.blockedTypes).length < MAX_TRACE_TYPES) trace.blockedTypes[key] = 0;
+      }
+      if (Object.prototype.hasOwnProperty.call(trace.blockedTypes, key)) trace.blockedTypes[key]++;
+    }
+    return block;
   }
 
   function setStrictEngagement(engage, vid, srcLabel) {
@@ -748,17 +931,8 @@
 
   // ---- Capability hooks: promotion (upgrade-only) + optional strict blocking ----
   function installCapabilityPromotion() {
-    var vp9Base = false, opusBase = false;
-    try {
-      var ms0 = window.MediaSource;
-      if (ms0 && typeof ms0.isTypeSupported === 'function') {
-        vp9Base = !!(ms0.isTypeSupported('video/webm; codecs="vp9"') ||
-                     ms0.isTypeSupported('video/webm; codecs="vp09"'));
-        opusBase = !!ms0.isTypeSupported('audio/webm; codecs="opus"');
-      }
-    } catch (e) {}
-    state.vp9Base = vp9Base;
-    state.opusBase = opusBase;
+    var base = detectCapabilityBase();
+    var vp9Base = base.vp9, opusBase = base.opus;
     if (!CONFIG.ENABLE_CAPABILITY_PROMOTION && !CONFIG.STRICT_AUDIO) return;
     if (!vp9Base && !opusBase) {
       // MediaSource missing at document-start (or the browser really has no
@@ -859,40 +1033,77 @@
       if (!p || typeof p.getVideoData !== 'function') return;
       var d = p.getVideoData();
       if (!d) return;
-      var vfam = codecFamily(d.videoCoding);
-      var afam = codecFamily(d.audioCoding);
+      // YT Music's getVideoData() carries no videoCoding/audioCoding, so the
+      // codec actually playing has to be read from Stats for nerds. Without
+      // this the script was blind on music.youtube.com (no verification, no
+      // evidence of a stuck codec).
+      var vCoding = d.videoCoding || null;
+      var aCoding = d.audioCoding || null;
+      var playingItag = d.itag != null ? d.itag : null;
+      var statsCodecs = null;
+      if ((!vCoding || !aCoding || playingItag == null) && typeof p.getStatsForNerds === 'function') {
+        try {
+          var st = p.getStatsForNerds() || {};
+          statsCodecs = parseStatsCodecs(st.codecs);
+          if (!vCoding) vCoding = statsCodecs.video;
+          if (!aCoding) aCoding = statsCodecs.audio;
+          if (playingItag == null) playingItag = statsCodecs.audioItag;
+        } catch (e) {}
+      }
+      var vfam = codecFamily(vCoding);
+      var afam = codecFamily(aCoding);
       if (d.video_id) state.currentVideoId = d.video_id;
       state.lastVideoData = {
-        videoCoding: d.videoCoding || null,
-        audioCoding: d.audioCoding || null,
-        itag: d.itag || null,
-        quality: d.quality || null,
-        videoId: d.video_id || null
+        videoCoding: vCoding,
+        audioCoding: aCoding,
+        itag: playingItag,
+        quality: d.video_quality || d.quality || null,
+        videoId: d.video_id || null,
+        source: statsCodecs ? 'stats' : 'getVideoData'
       };
+      traceCheck({
+        t: Date.now(),
+        video: d.video_id || null,
+        audio: aCoding,
+        audioItag: playingItag,
+        highAudio: !!state.highAudioAvailable,
+        src: statsCodecs ? 'stats' : 'videoData'
+      });
       // Stable per-video key: never fall back to a shared '?' bucket, or the
       // once-per-video bookkeeping would collapse into a single global slot.
       var vid = d.video_id || state.lastVideoId || 'nokey';
       var strictNow = false;
       try { strictNow = isStrictEngagedNow(); } catch (e) {}
-      var vOk = !d.videoCoding || vfam === CONFIG.VIDEO_PREFER;
-      var aOk = !d.audioCoding || afam === CONFIG.AUDIO_PREFER;
+      var vOk = !vCoding || vfam === CONFIG.VIDEO_PREFER;
+      var aOk = !aCoding || afam === CONFIG.AUDIO_PREFER;
       if (CONFIG.VERBOSE || !vOk || !aOk) {
         log('verification(' + reason + ') video=' + vid +
-          ' -> videoCoding=' + (d.videoCoding || '-') + ' [' + vfam + ']' +
-          ', audioCoding=' + (d.audioCoding || '-') + ' [' + afam + ']' +
+          ' -> videoCoding=' + (vCoding || '-') + ' [' + vfam + ']' +
+          ', audioCoding=' + (aCoding || '-') + ' [' + afam + ']' +
+          (playingItag != null ? ' itag=' + playingItag : '') +
           ' | vp9: ' + (vOk ? 'OK' : 'NOT VP9') + ', opus: ' + (aOk ? 'OK' : 'NOT OPUS') +
           (strictNow ? ' | strict-audio: ENGAGED' : '') +
           (state.sabr ? ' | SABR active' : ''));
       }
       // Engaged but the player still reports AAC: the block did not reach it.
-      if (strictNow && d.audioCoding && afam !== 'opus') {
+      if (strictNow && aCoding && afam !== 'opus') {
         warnOnce('strict-aac-' + vid, 'player still on AAC despite Strict Audio Mode ' +
           '(block did not reach the player, or SABR decided server-side) - video=' + vid);
+      }
+      // Smart mode: a 256k stream was offered but the player is not on one.
+      // Not actionable (SABR/ABR owns the final choice) but it is the evidence
+      // needed for a "codec stuck" report.
+      if (smartAacActive() && state.highAudioAvailable && playingItag != null &&
+          HIGH_QUALITY_AUDIO_ITAGS.indexOf(playingItag) === -1) {
+        warnOnce('stuck-audio-' + vid, 'playing itag ' + playingItag + ' (' + (aCoding || '?') + ')' +
+          ' although the player response offered a 256k stream (itags: ' +
+          (state.lastAudioFormats || []).map(function (f) { return f.itag; }).join(',') +
+          ') - video=' + vid + (state.sabr ? ' [SABR: chosen server-side]' : ''));
       }
       // Nudge (best effort): once per video, only when a VP9 variant exists for
       // the same quality. NOTE: re-requesting the current quality is often a
       // no-op; the player may ignore it entirely.
-      if (CONFIG.ENABLE_NUDGE && !vOk && d.videoCoding && !state.nudgedFor[vid]) {
+      if (CONFIG.ENABLE_NUDGE && !vOk && vCoding && !state.nudgedFor[vid]) {
         var h = currentHeight(d.quality);
         if (h != null && (!d.video_id || d.video_id === state.lastVideoId) && state.vp9Heights.indexOf(h) !== -1) {
           trackKey(state.nudgedFor, vid);
@@ -956,7 +1167,7 @@
 
   // ---- Debug API (use from the DevTools console) ----
   window.__VP9OPUS = {
-    version: '0.2.5',
+    version: '0.2.7',
     config: CONFIG,
     state: state,
     toggleVerbose: function () { CONFIG.VERBOSE = !CONFIG.VERBOSE; log('VERBOSE =', CONFIG.VERBOSE); return CONFIG.VERBOSE; },
@@ -980,6 +1191,23 @@
       return CONFIG.STRICT_AUDIO;
     },
     check: function () { checkCurrentCodecs('manual'); return state.lastVideoData; },
+    trace: function () {
+      return {
+        blocked: trace.blocked,
+        blockedTypes: JSON.parse(JSON.stringify(trace.blockedTypes)),
+        responses: trace.responses.slice(),
+        checks: trace.checks.slice(),
+        current: state.lastVideoData,
+        events: state.strictEvents.slice(-10)
+      };
+    },
+    resetTrace: function () {
+      trace.responses.length = 0;
+      trace.checks.length = 0;
+      trace.blocked = 0;
+      trace.blockedTypes = {};
+      return true;
+    },
     audio: function () {
       var vid = currentPlayingId();
       var engagedNow = false;
@@ -997,6 +1225,7 @@
         sabr: state.sabr,
         opusAvailable: state.opusAvailable,
         highAacAvailable: !!state.highAacAvailable,
+        highAudioAvailable: !!state.highAudioAvailable,
         current: state.lastVideoData,
         audioFormats: (state.lastAudioFormats || []).slice(),
         events: state.strictEvents.slice(-10)
@@ -1004,7 +1233,7 @@
     },
     dump: function () {
       return {
-        version: '0.2.5',
+        version: '0.2.7',
         host: location.host,
         config: JSON.parse(JSON.stringify(CONFIG)),
         responsesProcessed: state.responsesProcessed,
@@ -1014,6 +1243,7 @@
         sabr: state.sabr,
         opusAvailable: state.opusAvailable,
         highAacAvailable: !!state.highAacAvailable,
+        highAudioAvailable: !!state.highAudioAvailable,
         vp9Heights: state.vp9Heights.slice(),
         current: state.lastVideoData,
         lastSummary: state.lastSummary,

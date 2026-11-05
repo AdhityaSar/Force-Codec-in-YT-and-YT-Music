@@ -15,7 +15,7 @@ if (!match) throw new Error('Markers /* __CORE_START__ */ / /* __CORE_END__ */ n
 
 const core = new Function(
   '"use strict";\n' + match[1] +
-  '\nreturn { parseMimeType, codecFamily, primaryFamily, tierKey, hasFamily, isHighQualityAac, shouldEngageStrictAudio, prioritizeFormats, prioritizeStreamingData, strictBlockMime, isSafeVp9Promotion, isSafeOpusPromotion, STRICT_BLOCKED_AUDIO_FAMILIES };'
+  '\nreturn { parseMimeType, codecFamily, primaryFamily, tierKey, hasFamily, isHighQualityAac, isHighQualityAudio, parseStatsCodecs, shouldEngageStrictAudio, prioritizeFormats, prioritizeStreamingData, strictBlockMime, isSafeVp9Promotion, isSafeOpusPromotion, STRICT_BLOCKED_AUDIO_FAMILIES };'
 )();
 
 let passed = 0, failed = 0;
@@ -116,6 +116,94 @@ t('stable when the preferred codec is absent in a tier', () => {
 t('short/invalid arrays are safe', () => {
   eq(core.prioritizeFormats([]).list, []);
   eq(core.prioritizeFormats(null).list, []);
+});
+
+// Smart Audio Mode intent: when 256k AAC (itag 141) is allowed to play, the
+// sort must not put Opus in front of it inside the SAME quality tier (Premium
+// YT Music reports both as AUDIO_QUALITY_HIGH).
+t('smart AAC: same-tier 256k AAC (141) stays ahead of Opus', () => {
+  const premium = [
+    { itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 160000 },
+    { itag: 141, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 256000 }
+  ];
+  eq(core.prioritizeFormats(premium, { smartAac: true }).list.map(f => f.itag), [141, 251],
+    'smart mode must keep 256k AAC first');
+  eq(core.prioritizeFormats(premium, { smartAac: false }).list.map(f => f.itag), [251, 141],
+    'strict-opus mode still prefers Opus');
+});
+
+t('smart AAC: 128k AAC (140) never outranks Opus in the medium tier', () => {
+  const mixed = [
+    { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 130000 },
+    { itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 160000 },
+    { itag: 141, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 256000 }
+  ];
+  const out = core.prioritizeFormats(mixed, { smartAac: true }).list.map(f => f.itag);
+  ok(out.indexOf(251) < out.indexOf(140), 'opus must still win inside the 128k tier: ' + out);
+  eq(out.length, 3, 'no entry may be dropped');
+});
+
+// YT Music Premium "High" is delivered as BOTH 141 (AAC 256k) and 774 (Opus
+// 256k). Smart mode must recognise 774 as a high-quality stream too, otherwise
+// a track whose response only carries 774 gets strict-blocked (and its codec
+// then flips depending on which format list the server returned that time).
+t('high-quality audio detection covers itag 774 (Opus 256k)', () => {
+  const opus256 = { itag: 774, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 263000 };
+  const aac256 = { itag: 141, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 258000 };
+  ok(core.isHighQualityAudio(opus256, core.parseMimeType(opus256.mimeType)), '774 must count as high quality');
+  ok(core.isHighQualityAudio(aac256, core.parseMimeType(aac256.mimeType)), '141 must count as high quality');
+  ok(!core.isHighQualityAudio({ itag: 251, mimeType: 'audio/webm; codecs="opus"', bitrate: 136000 }, null), '251 must not');
+});
+
+t('strict audio does not engage when only a 256k Opus (774) is offered', () => {
+  const sd = { adaptiveFormats: [
+    { itag: 774, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 263000 },
+    { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 130000 }
+  ] };
+  eq(core.shouldEngageStrictAudio(sd, true, { allowHighAac: true }), false, '774 must be enough to leave AAC alone');
+});
+
+// Ordering rule: the coded preference wins on a tie, but a substantially
+// higher bitrate in the same tier wins over the codec family.
+t('smart audio ordering: 256k Opus (774) beats 256k AAC (141) at equal bitrate', () => {
+  const g = [
+    { itag: 141, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 258000 },
+    { itag: 774, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 263000 }
+  ];
+  eq(core.prioritizeFormats(g, { smartAac: true }).list.map(f => f.itag), [774, 141]);
+});
+
+t('smart audio ordering: 256k AAC (141) beats 160k Opus (251)', () => {
+  const g = [
+    { itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 160000 },
+    { itag: 141, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 258000 }
+  ];
+  eq(core.prioritizeFormats(g, { smartAac: true }).list.map(f => f.itag), [141, 251]);
+});
+
+t('smart audio ordering: free tier still prefers Opus (251 over 140)', () => {
+  const g = [
+    { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 130000 },
+    { itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 136000 }
+  ];
+  eq(core.prioritizeFormats(g, { smartAac: true }).list.map(f => f.itag), [251, 140]);
+});
+
+console.log('stats for nerds codec parsing');
+t('parses the Stats-for-nerds codec row (video + audio itag)', () => {
+  const p = core.parseStatsCodecs('vp09.00.51.08.01.01.01.01.00 (243) / opus (251)');
+  eq(p.videoItag, 243);
+  eq(p.audioItag, 251);
+  eq(core.codecFamily(p.audio), 'opus');
+  eq(core.codecFamily(p.video), 'vp9');
+});
+t('parses an audio-only row and survives junk', () => {
+  const p = core.parseStatsCodecs('mp4a.40.2 (141)');
+  eq(p.audioItag, 141);
+  eq(core.codecFamily(p.audio), 'aac');
+  eq(p.video, null);
+  eq(core.parseStatsCodecs(null).audio, null);
+  eq(core.parseStatsCodecs('').audioItag, null);
 });
 
 console.log('prioritizeStreamingData');
