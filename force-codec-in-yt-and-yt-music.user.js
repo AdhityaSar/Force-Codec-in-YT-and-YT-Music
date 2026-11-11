@@ -200,10 +200,10 @@
       for (var j = 0; j < g.length; j++) {
         if (merged[j] !== g[j]) {
           if (result === arr) result = arr.slice();
+          result[g[j].i] = merged[j].f;
           moved++;
           if (g[j].parsed && g[j].parsed.kind === 'audio') audioMoved++; else videoMoved++;
         }
-        result[g[j].i] = merged[j].f;
       }
     });
     return { list: result, moved: moved, videoMoved: videoMoved, audioMoved: audioMoved, groups: groupCount };

@@ -90,6 +90,12 @@ t('idempotent (running twice gives the same result)', () => {
   ok(r2.list === r.list, 'unchanged ordering should return the original array');
   eq([r2.videoMoved, r2.audioMoved, r2.groups], [0, 0, r.groups]);
 });
+t('unchanged frozen arrays are not written', () => {
+  const formats = Object.freeze(r.list.slice());
+  const unchanged = core.prioritizeFormats(formats);
+  ok(unchanged.list === formats, 'unchanged ordering should return the original frozen array');
+  eq(unchanged.moved, 0);
+});
 t('stable when the preferred codec is absent in a tier', () => {
   const noVp9 = [
     { itag: 1, mimeType: 'video/mp4; codecs="av01.0.08M.08"', height: 720, fps: 30 },
