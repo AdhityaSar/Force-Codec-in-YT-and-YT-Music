@@ -299,9 +299,7 @@
       groups[gi].push(info);
     });
 
-    var result = new Array(arr.length);
-    infos.forEach(function (info) { result[info.i] = info.f; });
-
+    var result = arr;
     var moved = 0, videoMoved = 0, audioMoved = 0, groupCount = 0;
     groups.forEach(function (g) {
       if (g.length < 2) return;
@@ -312,8 +310,9 @@
       var others = g.filter(function (x) { return x.family !== prefer; });
       var merged = preferred.concat(others); // filter() preserves order -> stable
       for (var j = 0; j < g.length; j++) {
-        result[g[j].i] = merged[j].f;
         if (merged[j] !== g[j]) {
+          if (result === arr) result = arr.slice();
+          result[g[j].i] = merged[j].f;
           moved++;
           if (g[j].parsed && g[j].parsed.kind === 'audio') audioMoved++; else videoMoved++;
         }
