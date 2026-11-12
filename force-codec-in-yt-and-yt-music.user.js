@@ -142,6 +142,16 @@
     return codecFamily(parsed.codecs[0]);
   }
 
+  function hasHdrColorInfo(colorInfo) {
+    if (!colorInfo || typeof colorInfo !== 'object') return false;
+    for (var key in colorInfo) {
+      if (Object.prototype.hasOwnProperty.call(colorInfo, key) &&
+          typeof colorInfo[key] === 'string' &&
+          /hlg|pq|smpte2084|bt2020/i.test(colorInfo[key])) return true;
+    }
+    return false;
+  }
+
   /** Quality tier key: video = (height, fps, hdr); audio = (audioQuality, channels). */
   function tierKey(f, parsed) {
     if (!f) return 'null';
@@ -152,7 +162,7 @@
     var q = (h != null) ? h : String(f.qualityLabel || f.quality || '?');
     // ponytail: HDR detect via label or colorInfo transfer characteristics.
     var isHdr = (f.qualityLabel && /hdr/i.test(f.qualityLabel)) ||
-      (f.colorInfo && /hlg|pq|smpte2084|bt2020/i.test(JSON.stringify(f.colorInfo)));
+      hasHdrColorInfo(f.colorInfo);
     return 'v:' + q + ':f' + (f.fps != null ? f.fps : '?') + (isHdr ? ':hdr' : '');
   }
 

@@ -77,6 +77,9 @@ t('video differentiates SDR and HDR', () => {
   eq(core.tierKey({ height: 1080, fps: 60, qualityLabel: '1080p60' }, { kind: 'video' }), 'v:1080:f60');
   eq(core.tierKey({ height: 1080, fps: 60, qualityLabel: '1080p60 HDR' }, { kind: 'video' }), 'v:1080:f60:hdr');
   eq(core.tierKey({ height: 1080, fps: 60, colorInfo: { transferCharacteristics: 'COLOR_TRANSFER_CHARACTERISTICS_SMPTE2084' } }, { kind: 'video' }), 'v:1080:f60:hdr');
+  eq(core.tierKey({ height: 1080, fps: 60, colorInfo: { transferCharacteristics: 'COLOR_TRANSFER_CHARACTERISTICS_HLG' } }, { kind: 'video' }), 'v:1080:f60:hdr');
+  eq(core.tierKey({ height: 1080, fps: 60, colorInfo: { primaries: 'BT2020' } }, { kind: 'video' }), 'v:1080:f60:hdr');
+  eq(core.tierKey({ height: 1080, fps: 60, colorInfo: { transferCharacteristics: 'BT709', primaries: 'BT709' } }, { kind: 'video' }), 'v:1080:f60');
 });
 
 console.log('prioritizeFormats');
