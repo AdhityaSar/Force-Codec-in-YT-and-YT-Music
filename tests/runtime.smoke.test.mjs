@@ -98,15 +98,18 @@ function makeEnv(host = 'music.youtube.com') {
   let currentBody = '{}';
   let xhrBody = '';
 
+  let nativeItsCalls = 0;
   const mediaSource = {
     isTypeSupported(type) {
+      nativeItsCalls++;
       const s = String(type);
       if (/opus/i.test(s)) return true;
       if (/vp0?9/i.test(s)) return true;
       if (/mp4a|aac/i.test(s)) return true;   // native "true" so a block is observable
       if (/av01|avc1/i.test(s)) return true;
       return false;
-    }
+    },
+    get nativeItsCalls() { return nativeItsCalls; }
   };
 
   const htmlMediaElement = {
@@ -354,6 +357,13 @@ console.log('strict audio per-video');
   t('not engaged for a video without Opus', () => {
     eq(api.audio().engagedNowForCurrentVideo, false);
     ok(env.mediaSource.isTypeSupported(AAC), 'AAC must stay playable');
+  });
+
+  t('repeated capability probes use a bounded result cache', () => {
+    const before = env.mediaSource.nativeItsCalls;
+    env.mediaSource.isTypeSupported(OPUS);
+    env.mediaSource.isTypeSupported(OPUS);
+    eq(env.mediaSource.nativeItsCalls, before + 1, 'native isTypeSupported should run only once');
   });
 
   // A prefetched response for another video (which has Opus) must not block
