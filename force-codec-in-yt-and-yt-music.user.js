@@ -948,6 +948,21 @@
     function safeVp9(t) { return isSafeVp9Promotion(t); }
     function safeOpus(t) { return isSafeOpusPromotion(t); }
 
+    var probeCacheLimit = 128;
+    var probeCache = Object.create(null);
+    var probeCacheKeys = [];
+    function readProbeCache(key) {
+      if (Object.prototype.hasOwnProperty.call(probeCache, key)) return probeCache[key];
+      return null;
+    }
+    function writeProbeCache(key, value) {
+      if (probeCacheKeys.length >= probeCacheLimit) {
+        delete probeCache[probeCacheKeys.shift()];
+      }
+      probeCache[key] = value;
+      probeCacheKeys.push(key);
+    }
+
     try {
       var ms = window.MediaSource;
       var origITS = ms.isTypeSupported.bind(ms);
@@ -955,13 +970,20 @@
         try {
           if (shouldStrictBlock(type)) return false; // Strict Audio: conditional non-Opus audio block
         } catch (e) {}
+        if (typeof type === 'string') {
+          var cacheKey = 'its:' + type + '|p=' + !!CONFIG.ENABLE_CAPABILITY_PROMOTION +
+            '|s=' + !!CONFIG.STRICT_AUDIO;
+          var cached = readProbeCache(cacheKey);
+          if (cached !== null) return cached;
+        }
         var res = false;
         try { res = !!origITS(type); } catch (e) { res = false; }
         if (CONFIG.ENABLE_CAPABILITY_PROMOTION && !res && typeof type === 'string') {
           var t = type.toLowerCase();
-          if (vp9Base && safeVp9(t)) return true;   // promotion: false -> true
-          if (opusBase && safeOpus(t)) return true; // promotion: false -> true
+          if (vp9Base && safeVp9(t)) { writeProbeCache(cacheKey, true); return true; }   // promotion: false -> true
+          if (opusBase && safeOpus(t)) { writeProbeCache(cacheKey, true); return true; } // promotion: false -> true
         }
+        if (typeof type === 'string') writeProbeCache(cacheKey, res);
         return res;
       };
     } catch (e) { warnOnce('mse', 'isTypeSupported override failed:', e && e.message); }
@@ -973,13 +995,20 @@
         try {
           if (shouldStrictBlock(type)) return ''; // Strict Audio: conditional non-Opus audio block
         } catch (e) {}
+        if (typeof type === 'string') {
+          var cacheKey = 'cpt:' + type + '|p=' + !!CONFIG.ENABLE_CAPABILITY_PROMOTION +
+            '|s=' + !!CONFIG.STRICT_AUDIO;
+          var cached = readProbeCache(cacheKey);
+          if (cached !== null) return cached;
+        }
         var res = '';
         try { res = origCPT.call(this, type); } catch (e) { res = ''; }
         if (CONFIG.ENABLE_CAPABILITY_PROMOTION && res === '' && typeof type === 'string') {
           var t2 = type.toLowerCase();
-          if (vp9Base && safeVp9(t2)) return 'maybe';  // promotion: '' -> 'maybe'
-          if (opusBase && safeOpus(t2)) return 'maybe';
+          if (vp9Base && safeVp9(t2)) { writeProbeCache(cacheKey, 'maybe'); return 'maybe'; }  // promotion: '' -> 'maybe'
+          if (opusBase && safeOpus(t2)) { writeProbeCache(cacheKey, 'maybe'); return 'maybe'; }
         }
+        if (typeof type === 'string') writeProbeCache(cacheKey, res);
         return res;
       };
     } catch (e) { warnOnce('cpt', 'canPlayType override failed:', e && e.message); }
