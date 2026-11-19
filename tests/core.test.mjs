@@ -15,7 +15,7 @@ if (!match) throw new Error('Markers /* __CORE_START__ */ / /* __CORE_END__ */ n
 
 const core = new Function(
   '"use strict";\n' + match[1] +
-  '\nreturn { parseMimeType, codecFamily, primaryFamily, tierKey, hasFamily, isHighQualityAac, isHighQualityAudio, parseStatsCodecs, shouldEngageStrictAudio, prioritizeFormats, prioritizeStreamingData, strictBlockMime, isSafeVp9Promotion, isSafeOpusPromotion, STRICT_BLOCKED_AUDIO_FAMILIES };'
+  '\nreturn { parseMimeType, codecFamily, primaryFamily, tierKey, hasFamily, isHighQualityAac, isHighQualityAudio, parseStatsCodecs, shouldEngageStrictAudio, prioritizeFormats, prioritizeStreamingData, mightStrictBlockMime, strictBlockMime, isSafeVp9Promotion, isSafeOpusPromotion, STRICT_BLOCKED_AUDIO_FAMILIES };'
 )();
 
 let passed = 0, failed = 0;
@@ -324,6 +324,20 @@ t('opus not aac', () =>
 t('null parsed safe', () => eq(core.hasFamily(null, 'aac'), false));
 
 console.log('strictBlockMime (pure)');
+t('strict-block prefilter covers every known block family without matching unrelated codecs', () => {
+  const blocked = [
+    'audio/mp4; codecs="mp4a.40.2"',
+    'audio/mp4; codecs="aac"',
+    'audio/webm; codecs="vorbis"',
+    'audio/ogg; codecs="flac"',
+    'audio/mpeg; codecs="mp3"',
+    'video/mp4; codecs="avc1.640028, mp4a.40.2"'
+  ];
+  ok(blocked.every(type => core.mightStrictBlockMime(type)));
+  ok(!core.mightStrictBlockMime('audio/webm; codecs="opus"'));
+  ok(!core.mightStrictBlockMime('video/webm; codecs="vp9"'));
+  ok(!core.mightStrictBlockMime(null));
+});
 t('blocks AAC audio while engaged', () => {
   eq(core.strictBlockMime('audio/mp4; codecs="mp4a.40.2"', true), true);
   eq(core.strictBlockMime('audio/mp4; codecs=mp4a.40.2', true), true);

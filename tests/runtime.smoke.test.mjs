@@ -45,15 +45,19 @@ function makePlayer() {
     state: 1,          // 1 = playing
     time: 10,
     reloads: [],
-    nudges: []
+    nudges: [],
+    videoDataReads: 0
   };
-  player.getVideoData = () => ({
-    video_id: player.videoId,
-    videoCoding: 'avc1.640028',
-    audioCoding: 'mp4a.40.2',
-    itag: 137,
-    quality: 'hd1080'
-  });
+  player.getVideoData = () => {
+    player.videoDataReads++;
+    return {
+      video_id: player.videoId,
+      videoCoding: 'avc1.640028',
+      audioCoding: 'mp4a.40.2',
+      itag: 137,
+      quality: 'hd1080'
+    };
+  };
   player.getPlayerState = () => player.state;
   player.getCurrentTime = () => player.time;
   player.getPlaybackQuality = () => 'hd1080';
@@ -381,6 +385,14 @@ console.log('strict audio per-video');
     const proto = env.sandbox.window.HTMLMediaElement.prototype;
     eq(proto.canPlayType(AAC), '');
     eq(proto.canPlayType(PURE_VIDEO), 'probably');
+  });
+
+  t('non-blockable codec probes skip the player video lookup', () => {
+    const readsBefore = env.player.videoDataReads;
+    ok(env.mediaSource.isTypeSupported(PURE_VIDEO));
+    ok(env.mediaSource.isTypeSupported(OPUS));
+    eq(env.sandbox.window.HTMLMediaElement.prototype.canPlayType(PURE_VIDEO), 'probably');
+    eq(env.player.videoDataReads, readsBefore);
   });
 
   const mc = env.sandbox.window.navigator.mediaCapabilities;
