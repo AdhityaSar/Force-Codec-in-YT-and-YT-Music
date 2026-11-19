@@ -376,6 +376,18 @@
   var STRICT_BLOCKED_AUDIO_FAMILIES = ['aac', 'vorbis', 'flac', 'mp3'];
 
   /**
+   * Cheap, conservative prefilter for MIME types that could be blocked.
+   * False positives only do extra work; false negatives would skip a block.
+   */
+  function mightStrictBlockMime(type) {
+    if (typeof type !== 'string') return false;
+    var t = type.toLowerCase();
+    return t.indexOf('mp4a') !== -1 || t.indexOf('aac') !== -1 ||
+      t.indexOf('vorbis') !== -1 || t.indexOf('flac') !== -1 ||
+      t.indexOf('mp3') !== -1;
+  }
+
+  /**
    * True when the given mimetype must be reported as unsupported because
    * Strict Audio Mode is engaged (pure: `engaged` is passed in explicitly).
    * Only audio codecs in STRICT_BLOCKED_AUDIO_FAMILIES (e.g. AAC/MP4A) and
@@ -688,19 +700,19 @@
    * known non-Opus audio families and MP4 muxed streams containing AAC are.
    */
   function shouldStrictBlock(type) {
+    if (!mightStrictBlockMime(type)) return false;
+    var block = strictBlockMime(type, true);
+    if (!block) return false;
     var engaged;
     try { engaged = isStrictEngagedNow(); } catch (e) { return false; }
     if (!engaged) return false;
-    var block = strictBlockMime(type, true);
-    if (block) {
-      trace.blocked++;
-      var key = String(type).slice(0, 80);
-      if (!Object.prototype.hasOwnProperty.call(trace.blockedTypes, key)) {
-        if (Object.keys(trace.blockedTypes).length < MAX_TRACE_TYPES) trace.blockedTypes[key] = 0;
-      }
-      if (Object.prototype.hasOwnProperty.call(trace.blockedTypes, key)) trace.blockedTypes[key]++;
+    trace.blocked++;
+    var key = String(type).slice(0, 80);
+    if (!Object.prototype.hasOwnProperty.call(trace.blockedTypes, key)) {
+      if (Object.keys(trace.blockedTypes).length < MAX_TRACE_TYPES) trace.blockedTypes[key] = 0;
     }
-    return block;
+    if (Object.prototype.hasOwnProperty.call(trace.blockedTypes, key)) trace.blockedTypes[key]++;
+    return true;
   }
 
   function setStrictEngagement(engage, vid, srcLabel) {
