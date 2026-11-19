@@ -115,9 +115,20 @@ function makeEnv(host = 'music.youtube.com') {
     }
   };
 
+  const mediaCapabilities = {
+    decodingInfo(cfg) {
+      return Promise.resolve({ supported: true, smooth: true, powerEfficient: true });
+    }
+  };
+
+  const navigatorObj = {
+    mediaCapabilities
+  };
+
   const windowObj = {
     MediaSource: mediaSource,
     HTMLMediaElement: htmlMediaElement,
+    navigator: navigatorObj,
     fetch(input) {
       const url = typeof input === 'string' ? input : (input && input.url) || '';
       if (url.indexOf('/youtubei/v1/player') === -1) {
@@ -144,6 +155,7 @@ function makeEnv(host = 'music.youtube.com') {
   const sandbox = {
     window: windowObj,
     document: documentObj,
+    navigator: navigatorObj,
     location: { host, pathname: '/watch', href: 'https://' + host + '/watch' },
     console: {
       log: (...a) => logs.push(a),
@@ -162,7 +174,7 @@ function makeEnv(host = 'music.youtube.com') {
       if (i !== -1) timers.splice(i, 1);
     }
   };
-  sandbox.XMLHttpRequest = makeXHRClass(() => xhrBody);
+  sandbox.XMLHttpRequest = makeXHRClass((url) => (url && url.includes('/youtubei/v1/player')) ? xhrBody : 'non-player');
 
   function advance(ms) {
     const target = now + ms;
@@ -273,6 +285,32 @@ console.log('fetch hook');
 }
 
 // --------------------------------------------------------------------------
+// ytInitialPlayerResponse trap
+// --------------------------------------------------------------------------
+
+console.log('ytInitialPlayerResponse trap');
+{
+  const env = makeEnv();
+  // Pre-populate before run() to verify it is not lost and is immediately processed
+  env.sandbox.window.ytInitialPlayerResponse = {
+    videoDetails: { videoId: 'PRE_EXISTING' },
+    streamingData: {
+      adaptiveFormats: [
+        { itag: 137, mimeType: 'video/mp4; codecs="avc1.640028"', height: 1080, fps: 30 },
+        { itag: 248, mimeType: 'video/webm; codecs="vp9"', height: 1080, fps: 30 }
+      ]
+    }
+  };
+  env.run();
+  const yipr = env.sandbox.window.ytInitialPlayerResponse;
+  t('pre-existing ytInitialPlayerResponse is preserved and prioritized', () => {
+    ok(yipr != null, 'must not be undefined');
+    eq(yipr.videoDetails.videoId, 'PRE_EXISTING');
+    eq(yipr.streamingData.adaptiveFormats.map((f) => f.itag), [248, 137]);
+  });
+}
+
+// --------------------------------------------------------------------------
 // XHR hook
 // --------------------------------------------------------------------------
 
@@ -293,6 +331,12 @@ console.log('XHR hook');
   });
   t('response mirrors responseText', () => eq(xhr.response, text));
   t('no runtime error was thrown', () => eq(env.errors.map((e) => e.message), []));
+
+  xhr.open('GET', 'https://music.youtube.com/other');
+  xhr.send();
+  t('reused XHR resets state for non-player url', () => {
+    eq(xhr.responseText, 'non-player');
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -339,6 +383,14 @@ console.log('strict audio per-video');
     eq(proto.canPlayType(PURE_VIDEO), 'probably');
   });
 
+  const mc = env.sandbox.window.navigator.mediaCapabilities;
+  const aacRes = await mc.decodingInfo({ audio: { contentType: AAC } });
+  const opusRes = await mc.decodingInfo({ audio: { contentType: OPUS } });
+  t('decodingInfo is blocked consistently for AAC and passes for Opus', () => {
+    eq(aacRes.supported, false);
+    eq(opusRes.supported, true);
+  });
+
   t('toggleStrictAudio(false) releases the block immediately', () => {
     eq(api.toggleStrictAudio(), false);
     eq(api.audio().engagedNowForCurrentVideo, false);
@@ -352,6 +404,47 @@ console.log('strict audio per-video');
   });
 }
 
+// Smart mode: high-quality AAC (itag 141) is not blocked on YT Music
+{
+  const env = makeEnv();
+  env.run();
+  const api = env.api();
+  const RESPONSE_PREMIUM = {
+    videoDetails: { videoId: 'VID_PREMIUM' },
+    streamingData: {
+      adaptiveFormats: [
+        { itag: 141, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 256000 },
+        { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 128000 },
+        { itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 160000 }
+      ]
+    }
+  };
+  env.player.videoId = 'VID_PREMIUM';
+  env.setBody(RESPONSE_PREMIUM);
+  await env.sandbox.window.fetch(PLAYER_URL);
+
+  t('smart mode: high-quality AAC does not engage strict blocking', () => {
+    eq(api.audio().highAacAvailable, true);
+    eq(api.audio().engagedNowForCurrentVideo, false);
+    ok(env.mediaSource.isTypeSupported(AAC), 'AAC must remain playable for 256k tier');
+  });
+
+  api.config.ALLOW_HIGH_AUDIO_AAC = false;
+  await env.sandbox.window.fetch(PLAYER_URL);
+  t('smart mode: disabling ALLOW_HIGH_AUDIO_AAC re-enables strict blocking', () => {
+    eq(api.audio().engagedNowForCurrentVideo, true);
+    eq(env.mediaSource.isTypeSupported(AAC), false);
+  });
+
+  t('smart mode: toggleStrictAudio respects ALLOW_HIGH_AUDIO_AAC and highAacAvailable', () => {
+    api.config.ALLOW_HIGH_AUDIO_AAC = true;
+    api.toggleStrictAudio(); // turns off
+    eq(api.audio().engagedNowForCurrentVideo, false);
+    api.toggleStrictAudio(); // turns on, but high AAC is present -> does not engage
+    eq(api.audio().engagedNowForCurrentVideo, false);
+    ok(env.mediaSource.isTypeSupported(AAC));
+  });
+}
 // Per-video engagement history is bounded to avoid growing for the lifetime
 // of a long-running YouTube tab.
 {
@@ -423,6 +516,27 @@ async function engagedEnv(time) {
   t('healthy buffering does not trigger a reload', () => eq(env.player.reloads.length, 0));
 }
 {
+  // Consecutive Opus tracks: watchdog arms for subsequent videos too.
+  const env = await engagedEnv(10);
+  env.player.videoId = 'VID_NEXT';
+  env.player.time = 0;
+  env.setBody({
+    videoDetails: { videoId: 'VID_NEXT' },
+    streamingData: {
+      adaptiveFormats: [{ itag: 251, mimeType: 'audio/webm; codecs="opus"' }]
+    }
+  });
+  await env.sandbox.window.fetch(PLAYER_URL);
+  env.player.state = 3;
+  env.advance(9100);
+  t('watchdog arms for consecutive Opus track and recovers stuck buffer', () => {
+    eq(env.player.reloads.length, 1);
+    eq(env.player.reloads[0], ['VID_NEXT', 0]);
+    const events = env.api().audio().events.map((e) => e.video);
+    ok(events.includes(VID_B) && events.includes('VID_NEXT'));
+  });
+}
+{
   // Playing (state 1) with a frozen position must never trigger a reload.
   const env = await engagedEnv(7);
   env.player.state = 1;
@@ -439,6 +553,162 @@ async function engagedEnv(time) {
   t('codec errors trigger recovery', () => {
     env.fireDocumentEvent('error', { tagName: 'VIDEO', error: { code: 4 } });
     eq(env.player.reloads.length, 1);
+  });
+}
+
+// --------------------------------------------------------------------------
+// Verification & nudge for SD named quality levels
+// --------------------------------------------------------------------------
+
+console.log('verification & nudge');
+{
+  const env = makeEnv();
+  env.run();
+  const api = env.api();
+  // Player response offering 480p VP9
+  env.setBody({
+    videoDetails: { videoId: 'SD_VID' },
+    streamingData: {
+      adaptiveFormats: [
+        { itag: 244, mimeType: 'video/webm; codecs="vp9"', height: 480, fps: 30 },
+        { itag: 135, mimeType: 'video/mp4; codecs="avc1.4d401e"', height: 480, fps: 30 }
+      ]
+    }
+  });
+  await env.sandbox.window.fetch(PLAYER_URL);
+  eq(api.state.vp9Heights, [480]);
+
+  // Player playing AVC at "large" (standard YouTube name for 480p)
+  env.player.videoId = 'SD_VID';
+  env.player.getVideoData = () => ({
+    video_id: 'SD_VID',
+    videoCoding: 'avc1.4d401e',
+    audioCoding: 'opus',
+    quality: 'large'
+  });
+  env.player.getPlaybackQuality = () => 'large';
+
+  api.check();
+  t('nudge fires for named SD quality level (large -> 480p)', () => {
+    eq(env.player.nudges.length, 1);
+    eq(env.player.nudges[0], ['large', 'large']);
+  });
+}
+
+// --------------------------------------------------------------------------
+// Regression: long YT Music sessions (Premium smart audio)
+// --------------------------------------------------------------------------
+
+console.log('long-session regressions');
+{
+  // (1) The very first player response of a page load (the
+  // ytInitialPlayerResponse trap) runs BEFORE installCapabilityPromotion(), so
+  // the strict decision used to be made with state.opusBase === false and the
+  // video was permanently recorded as "disengaged" for that page session.
+  const env = makeEnv();
+  env.player.videoId = VID_B;
+  env.sandbox.window.ytInitialPlayerResponse = {
+    videoDetails: { videoId: VID_B },
+    streamingData: {
+      adaptiveFormats: [
+        { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM' },
+        { itag: 251, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_MEDIUM' }
+      ]
+    }
+  };
+  env.run();
+  t('document-start response is judged with the capability base known', () => {
+    eq(env.api().audio().engagedNowForCurrentVideo, true, 'strict must be able to engage for the first track');
+    eq(env.mediaSource.isTypeSupported(AAC), false, 'AAC must be blocked while engaged');
+  });
+}
+{
+  // (2) Blocking must never be based on a video the player is not known to be
+  // playing: during a YT Music track transition getVideoData() has no
+  // video_id, and the stale global flag used to block AAC for the wrong track.
+  const env = makeEnv();
+  env.run();
+  env.player.videoId = VID_B;
+  env.setBody(RESPONSE_B);
+  await env.sandbox.window.fetch(PLAYER_URL);
+  eq(env.api().audio().engagedNowForCurrentVideo, true, 'precondition: engaged for VID_B');
+  env.player.getVideoData = () => ({});   // transition / no id reported
+  t('unknown current video never blocks audio (fail-open)', () => {
+    eq(env.api().audio().engagedNowForCurrentVideo, false);
+    ok(env.mediaSource.isTypeSupported(AAC), 'AAC must stay playable when the playing video is unknown');
+  });
+}
+{
+  // (3) Diagnostics for the "stuck at 251" report: what was actually blocked.
+  const env = makeEnv();
+  env.run();
+  env.player.videoId = VID_B;
+  env.setBody(RESPONSE_B);
+  await env.sandbox.window.fetch(PLAYER_URL);
+  env.mediaSource.isTypeSupported(AAC);
+  const tr = env.api().trace();
+  t('trace records each player response with its audio evidence', () => {
+    eq(tr.responses.length, 1);
+    eq(tr.responses[0].video, VID_B);
+    eq(tr.responses[0].highAac, false);
+    eq(tr.responses[0].opus, true);
+    eq(tr.responses[0].engaged, true);
+    ok(tr.responses[0].itags.length === 2, 'audio itags must be recorded');
+  });
+  t('trace records blocked capability probes', () => {
+    ok(tr.blocked > 0, 'a blocked probe must be counted, got ' + tr.blocked);
+  });
+}
+{
+  // Premium "High" can be delivered as 774 (Opus 256k) alone. Smart mode must
+  // leave AAC playable then, so the codec of that track no longer depends on
+  // which format list the server happened to return (774-only vs 141+774).
+  const env = makeEnv();
+  env.run();
+  env.player.videoId = 'VID_OPUS256';
+  env.setBody({
+    videoDetails: { videoId: 'VID_OPUS256' },
+    streamingData: {
+      adaptiveFormats: [
+        { itag: 774, mimeType: 'audio/webm; codecs="opus"', audioQuality: 'AUDIO_QUALITY_HIGH', bitrate: 263000 },
+        { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', audioQuality: 'AUDIO_QUALITY_MEDIUM', bitrate: 130000 },
+        { itag: 137, mimeType: 'video/mp4; codecs="avc1.640028"', height: 1080, fps: 30 }
+      ]
+    }
+  });
+  await env.sandbox.window.fetch(PLAYER_URL);
+  t('774-only response keeps AAC playable (no strict block)', () => {
+    eq(env.api().audio().engagedNowForCurrentVideo, false, 'strict must not engage when a 256k Opus exists');
+    ok(env.mediaSource.isTypeSupported(AAC), 'AAC must stay playable');
+    eq(env.api().audio().highAudioAvailable, true, '774 must be reported as high-quality audio');
+  });
+}
+
+{
+  // YT Music's getVideoData() has no audioCoding (verified live). The codec
+  // actually playing must come from getStatsForNerds().codecs, otherwise the
+  // script cannot tell "stuck on 251" apart from "fine" on music.youtube.com.
+  const env = makeEnv();
+  env.run();
+  const api = env.api();
+  env.player.videoId = VID_B;
+  env.player.getVideoData = () => ({ video_id: VID_B, video_quality: 'medium' });
+  env.player.getStatsForNerds = () => ({ codecs: 'vp09.00.51.08.01.01.01.01.00 (243) / opus (774)' });
+  env.setBody(RESPONSE_B);
+  await env.sandbox.window.fetch(PLAYER_URL);
+  api.check();
+  t('codec is read from Stats for nerds when getVideoData is silent', () => {
+    const d = api.state.lastVideoData;
+    eq(d.audioCoding, 'opus');
+    eq(d.itag, 774);
+    eq(d.source, 'stats');
+    ok(api.dump().current != null);
+  });
+  t('player codec check is recorded in the trace', () => {
+    const c = api.trace().checks;
+    eq(c.length, 1);
+    eq(c[0].audioItag, 774);
+    eq(c[0].src, 'stats');
   });
 }
 
