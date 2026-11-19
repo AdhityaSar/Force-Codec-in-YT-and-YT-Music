@@ -445,7 +445,6 @@ console.log('strict audio per-video');
     ok(env.mediaSource.isTypeSupported(AAC));
   });
 }
-
 // Per-video engagement history is bounded to avoid growing for the lifetime
 // of a long-running YouTube tab.
 {
